@@ -1,0 +1,11 @@
+# 忽略编译产物目录
+build/
+cmake-build-debug/
+cmake-build-release/
+
+# 忽略日志
+logs/
+*.log
+
+# 忽略 VS Code 配置
+.vscode/
