@@ -166,6 +166,22 @@ public:
         return items_[(head_ + index) % capacity_];
     }
 
+    // 清空队列
+    void Clear() noexcept {
+        head_ = tail_ = 0;
+        overrun_counter_ = 0;
+    }
+
+    // 获取溢出计数
+    size_type OverrunCounter() const noexcept {
+        return overrun_counter_;
+    }
+
+    // 重置溢出计数
+    void ResetOverrunCounter() noexcept {
+        overrun_counter_ = 0;
+    }
+
 private:
     size_type capacity_ = 1;        // 实际容量（+1用于区分满和空）
     size_type head_ = 0;            // 头指针
