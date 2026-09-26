@@ -1,8 +1,12 @@
 #pragma once
+/*
+使用std::vector实现循环队列
+*/
 #include <vector>
 #include <stdexcept>
 #include <cassert>
 
+namespace thread_pool_improved {
 template <typename T>
 class CircularQueue {
 public:
@@ -189,3 +193,4 @@ private:
     size_type overrun_counter_ = 0; // 溢出计数
     std::vector<T> items_;          // 存储容器
 };
+}
