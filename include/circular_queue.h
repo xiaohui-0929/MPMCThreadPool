@@ -18,6 +18,40 @@ public:
         : capacity_(capacity > 0 ? capacity + 1 : 1)
         , items_(capacity_) {}
 
+    // 拷贝构造和赋值
+    CircularQueue(const CircularQueue&) = default;
+    CircularQueue& operator=(const CircularQueue&) = default;
+
+    // 移动构造
+    CircularQueue(CircularQueue&& other) noexcept 
+        : capacity_(other.capacity_)
+        , head_(other.head_)
+        , tail_(other.tail_)
+        , overrun_counter_(other.overrun_counter_)
+        , items_(std::move(other.items_)) {
+        // 重置other状态
+        other.capacity_ = 1;
+        other.head_ = 0;
+        other.tail_ = 0;
+        other.overrun_counter_ = 0;
+    }
+    // 移动赋值
+    CircularQueue& operator=(CircularQueue&& other) noexcept {
+        if (this != &other) {
+            capacity_ = other.capacity_;
+            head_ = other.head_;
+            tail_ = other.tail_;
+            overrun_counter_ = other.overrun_counter_;
+            items_ = std::move(other.items_);
+            // 重置other状态
+            other.capacity_ = 1;
+            other.head_ = 0;
+            other.tail_ = 0;
+            other.overrun_counter_ = 0;
+        }
+        return *this;
+    }
+
     // 核心操作
     // 入队（移动语义）
     void PushBack(T&& item) {
