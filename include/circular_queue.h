@@ -17,13 +17,49 @@ public:
         , items_(capacity_) {}
 
     // 核心操作
-    // 入队（右值）
-    void PushBack(T&& item);
-    // 入队（左值）
-    void PushBack(const T& item);
+    // 入队（移动语义）
+    void PushBack(T&& item) {
+        if (capacity_ <= 1) return;
+
+        // 使用移动语义避免拷贝
+        items_[tail_] = std::move(item);
+        tail_ = (tail_ + 1) % capacity_;    // 循环
+        
+        // 若队列已满，覆盖最旧数据
+        if (tail_ == head_) {
+            head_ = (head_ + 1) % capacity_;
+            ++overrun_counter_;
+        }
+    }
+    // 入队（拷贝语义）
+    void PushBack(const T& item) {
+        if (capacity_ <= 1) return;
+
+        // 拷贝赋值
+        item[tail_] = item;
+        tail_ = (tail_ + 1) % capacity_;    // 循环
+
+        // 若队列已满，覆盖最旧数据
+        if (tail_ == head_) {
+            head_ = (head_ + 1) % capacity_;
+            ++overrun_counter_;
+        }
+    }
     // 原地构造
     template<typename... Args>
-    void EmplaceBack(Args&&... args);
+    void EmplaceBack(Args&&... args) {
+        if (capacity_ <= 1) return;
+
+        // 直接在目标位置构建对象
+        items_[tail_] = T(std::forward<Args>(args)...);
+        tail_ = (tail_ + 1) % capacity_;    // 循环
+        
+        // 若队列已满，覆盖最旧数据
+        if (tail_ == head_) {
+            head_ = (head_ + 1) % capacity_;
+            ++overrun_counter_;
+        }
+    }
 
     // 出队
     void PopFront();
