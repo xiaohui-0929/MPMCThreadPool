@@ -1,5 +1,7 @@
 #pragma once
 #include <vector>
+#include <stdexcept>
+#include <cassert>
 
 template <typename T>
 class CircularQueue {
@@ -53,7 +55,7 @@ public:
         // 直接在目标位置构建对象
         items_[tail_] = T(std::forward<Args>(args)...);
         tail_ = (tail_ + 1) % capacity_;    // 循环
-        
+
         // 若队列已满，覆盖最旧数据
         if (tail_ == head_) {
             head_ = (head_ + 1) % capacity_;
@@ -62,11 +64,27 @@ public:
     }
 
     // 出队
-    void PopFront();
+    void PopFront() {
+        if (Empty()) {
+            throw std::runtime_error("Cannot pop form empty CircularQueue");
+        }
+        // 头指针移动覆盖
+        head_ = (head_ + 1) % capacity_;
+    }
     // 获得队首
-    reference Front();
+    reference Front() {
+        if (Empty()) {
+            throw std::runtime_error("CircularQueue is empty");
+        }
+        return items_[head_];
+    }
     // 获得队首 const
-    const_reference Front() const;
+    const_reference Front() const {
+        if (Empty()) {
+            throw std::runtime_error("CircularQueue is empty");
+        }
+        return items_[head_];
+    }
 
     // 状态查询
     bool Empty() const noexcept {
@@ -91,10 +109,28 @@ public:
     }
 
     // 随机访问
-    reference At(size_type index);
-    const_reference At(size_type index) const;
-    reference operator[](size_type index) noexcept;
-    const_reference operator[](size_type index) const noexcept;
+    // 含边界检查
+    reference At(size_type index) {
+        if (index >= Size()) {
+            throw std::out_of_range("Index out of range");
+        }
+        return items_[(head_ + index) % capacity_];
+    }
+    const_reference At(size_type index) const {
+        if (index >= Size()) {
+            throw std::out_of_range("Index out of range");
+        }
+        return items_[(head_ + index) % capacity_];
+    }
+    // 不含边界检查
+    reference operator[](size_type index) noexcept {
+        assert(index < Size()); // 调试模式下检查
+        return items_[(head_ + index) % capacity_];
+    }
+    const_reference operator[](size_type index) const noexcept {
+        assert(index < Size()); // 调试模式下检查
+        return items_[(head_ + index) % capacity_];
+    }
 
 private:
     size_type capacity_ = 1;        // 实际容量（+1用于区分满和空）
