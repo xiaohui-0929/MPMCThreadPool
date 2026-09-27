@@ -113,9 +113,9 @@ public:
     }
 
 private:
-    std::mutex queue_mutex_;                    // 队列互斥锁
-    std::conditional_variable push_cv_;         // 入队条件变量
-    std::conditional_variable pop_cv_;          // 出队条件变量
+    mutable std::mutex queue_mutex_;            // 队列互斥锁
+    std::condition_variable push_cv_;           // 入队条件变量
+    std::condition_variable pop_cv_;            // 出队条件变量
     CircularQueue<T> circular_queue_;           // 底层循环队列
     std::atomic<size_t> discard_counter_{0};    // 丢弃计数器
 };

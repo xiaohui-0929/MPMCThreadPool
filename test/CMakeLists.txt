@@ -15,8 +15,16 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include)
 add_executable(circular_queue_test
     unit/circular_q_test.cpp)
 
+add_executable(mpmc_blocking_queue_test
+    unit/mpmc_blocking_q_test.cpp)
+
 # 链接必要的库
 target_link_libraries(circular_queue_test
+    GTest::gtest
+    GTest::gtest_main
+    pthread)
+
+target_link_libraries(mpmc_blocking_queue_test
     GTest::gtest
     GTest::gtest_main
     pthread)
@@ -24,7 +32,10 @@ target_link_libraries(circular_queue_test
 # 启用测试
 enable_testing()
 add_test(NAME CirculatQueueTests COMMAND circular_queue_test)
+add_test(NAME MPMCBlockingQueueTests COMMAND mpmc_blocking_queue_test)
 
 # 添加编译选项
 target_compile_options(circular_queue_test PRIVATE
+    -Wall -Wextra -Wpedantic)
+target_compile_options(mpmc_blocking_queue_test PRIVATE
     -Wall -Wextra -Wpedantic)
