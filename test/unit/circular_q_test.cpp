@@ -43,7 +43,8 @@ TEST_F(CircularQueueTest, BasicOperations) {
     CircularQueue<int> q(3);
 
     // 测试插入
-    q.PushBack(10);
+    int item = 10;
+    q.PushBack(item);
     EXPECT_FALSE(q.Empty());
     EXPECT_EQ(q.Size(), 1);
     EXPECT_EQ(q.Front(), 10);

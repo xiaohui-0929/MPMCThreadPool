@@ -76,7 +76,7 @@ public:
         if (capacity_ <= 1) return;
 
         // 拷贝赋值
-        item[tail_] = item;
+        items_[tail_] = item;
         tail_ = (tail_ + 1) % capacity_;    // 循环
 
         // 若队列已满，覆盖最旧数据
