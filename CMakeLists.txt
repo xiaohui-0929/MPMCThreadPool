@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(ThreadPool)
 
 # 设置输出完整、详细的编译命令
-set(CMAKE_VERBOSE_MAKEFILE ON)
+#set(CMAKE_VERBOSE_MAKEFILE ON)
 
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 14)
@@ -36,3 +36,7 @@ include_directories(include)
 add_executable(test_installation src/test_installation.cpp)
 
 # todo 链接依赖
+
+# 添加测试子目录
+add_subdirectory(test)
+
