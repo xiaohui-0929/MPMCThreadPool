@@ -67,6 +67,7 @@ public:
         
         // 若队列已满，覆盖最旧数据
         if (tail_ == head_) {
+            items_[head_] = T{};    // 主动覆盖最旧元素 避免外界卡死
             head_ = (head_ + 1) % capacity_;
             ++overrun_counter_;
         }

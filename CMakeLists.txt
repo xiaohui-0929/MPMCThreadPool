@@ -5,7 +5,7 @@ project(ThreadPool)
 #set(CMAKE_VERBOSE_MAKEFILE ON)
 
 # 设置C++标准
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 编译器特定优化
@@ -22,20 +22,16 @@ find_package(Threads REQUIRED)
 # 设置头文件路径
 include_directories(include)
 
-# todo 定义源文件
-#set(THREAD_POOL_SOURCES
-    #src/thread_pool_improved.cpp
-    #src/thread_pool_config.cpp
-    #src/logger.cpp
-#)
+# 创建静态库
+add_library(thread_pool_lib 
+    src/thread_pool_improved.cpp
+)
 
-# todo 创建静态库
-#add_library(thread_pool_static STATIC $(THREAD_POOL_SOURCES))
+# 链接依赖
+target_link_libraries(thread_pool_lib
+    Threads::Threads
+)
 
-# 创建可执行文件（验证环境搭建是否成功）
-add_executable(test_installation src/test_installation.cpp)
-
-# todo 链接依赖
 
 # 添加测试子目录
 add_subdirectory(test)

@@ -50,13 +50,13 @@ public:
         // 捕获异常 保证执行期间的异常可以正确传播
         try {
             // 编译期分支判断 对返回类型为void的任务特化处理
-            if constexpr (std::is_void_v(T)) {
+            if constexpr (std::is_void_v<T>) {
                 func_();    // 任务执行
                 promise_.set_value();
-                execution_success_ = true;
             } else {
                 promise_.set_value(func_());
             }
+            execution_success_ = true;
         } catch (...) {
             // promise_捕获异常
             promise_.set_exception(std::current_exception());
@@ -132,6 +132,18 @@ public:
     // 停止线程池（立即停止）
     void Stop();
 
+    // 获取当前队列中的任务数量
+    size_t QueueSize();
+
+    // 获取当前活跃线程数
+    size_t ActiveThreads();
+
+    // 等待所有线程执行结束
+    void WaitAll();
+
+    // 检查线程池是否已停止
+    bool IsStopped() const { return stop_.load(); }
+
 private:
     // 工作线程主循环函数
     void WorkerLoop();
@@ -141,17 +153,20 @@ private:
 
 private:
     // 线程管理
-    std::vector<std::thread> workers_;      // 工作线程容器
-    std::atomic<size_t> pending_tasks_{0};  // 待处理任务计数
+    std::vector<std::thread> workers_;          // 工作线程容器
+    std::atomic<bool> stop_{false};             // 停止标志
+    std::atomic<size_t> pending_tasks_{0};       // 待处理任务数
 
     // 同步原语
     std::condition_variable queue_condition_;   // 任务队列条件变量
+    std::condition_variable wait_condition_;    // 等待条件变量
+    std::mutex queue_mutex_;                    // 队列互斥锁
     
     // 配置参数
-    size_t max_queue_size_;             // 最大任务队列大小
-    queue_type task_queue_;             // 任务队列
-    QueueFullPolicy queue_policy_;      // 满队列处理策略
-    ThreadPoolStruct config_;           // 线程池配置信息
+    size_t max_queue_size_;                     // 最大任务队列大小
+    queue_type task_queue_;                     // 任务队列
+    QueueFullPolicy queue_policy_;              // 满队列处理策略
+    std::atomic<size_t> current_threads_{0};    // 当前线程数
 
     // 线程池状态（原子变量）
     std::atomic<ThreadPoolState> state_{ThreadPoolState::RUNNING};
