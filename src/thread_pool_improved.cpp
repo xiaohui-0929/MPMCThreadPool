@@ -19,12 +19,65 @@ ThreadPool::ThreadPool(
         throw std::invalid_argument("Thread count must be greater than 0");
     }
 
+    // 初始化默认配置（默认关闭动态线程管理）
+    config_.core_threads = thread_count;
+    config_.max_threads = thread_count;
+    config_.max_queue_size = max_queue_size;
+    config_.queue_full_policy = queue_policy;
+    config_.enable_dynamic_threads = false;
+
+    // 初始化动态线程管理相关数据结构
+    thread_last_active_.resize(thread_count);
+    thread_idle_count_.reserve(thread_count);
+    thread_should_exit_.reserve(thread_count);
+
+    for (size_t i = 0; i < thread_count; ++i) {
+        thread_idle_count_.emplace_back(std::make_unique<std::atomic<size_t>>(0));
+        thread_should_exit_.emplace_back(std::make_unique<std::atomic<bool>>(false));
+    }
+
     // 创建工作线程
     for (size_t i = 0; i < thread_count; ++i) {
         workers_.emplace_back(&ThreadPool::WorkerLoop, this);
+        thread_last_active_[i] = std::chrono::steady_clock::now();
     }
 
     current_threads_ = thread_count;
+}
+
+ThreadPool::ThreadPool(const ThreadPoolStruct& config) 
+    : max_queue_size_(config.max_queue_size)
+    , task_queue_(config.max_queue_size) 
+    , queue_policy_(config.queue_full_policy)
+    , config_(config) {
+        
+    // 验证参数
+    if (config.core_threads  == 0) {
+        throw std::invalid_argument("Thread count must be greater than 0");
+    }
+
+    // 初始化动态线程管理相关数据结构
+    thread_last_active_.resize(config.max_threads);
+    thread_idle_count_.reserve(config.max_threads);
+    thread_should_exit_.reserve(config.max_threads);
+
+    for (size_t i = 0; i < config.max_threads; ++i) {
+        thread_idle_count_.emplace_back(std::make_unique<std::atomic<size_t>>(0));
+        thread_should_exit_.emplace_back(std::make_unique<std::atomic<bool>>(false));
+    }
+
+    // 创建工作线程
+    for (size_t i = 0; i < config.core_threads; ++i) {
+        workers_.emplace_back(&ThreadPool::WorkerLoop, this);
+        thread_last_active_[i] = std::chrono::steady_clock::now();
+    }
+
+    current_threads_ = config_.core_threads;
+
+    // 启动负载均衡线程
+    if (config_.enable_dynamic_threads) {
+        load_balancer_thread_ = std::thread(&ThreadPool::LoadBalancingLoop, this);
+    }
 }
 
 // 析构函数
@@ -107,6 +160,11 @@ void ThreadPool::WaitAll() {
     });
 }
 
+// 触发负载检查
+void ThreadPool::TriggerLoadCheck() {
+    return;
+}
+
 // 核心循环函数 每个线程独立运行 负责获取和执行任务
 void ThreadPool::WorkerLoop() {
     
@@ -148,6 +206,36 @@ void ThreadPool::WorkerLoop() {
             wait_condition_.notify_all();
         }
     }
+}
+
+// 负载均衡循环函数 负责周期性检查线程状态
+void ThreadPool::LoadBalancingLoop() {
+    while (!load_balancer_stop_.load()) {
+        try {
+            // 先休眠一段间隔
+            std::this_thread::sleep_for(config_.load_check_interval);
+
+            // 如果状态改变则退出
+            if (load_balancer_stop_.load()) {
+                break;
+            }
+
+            // 触发负责均衡检查
+            TriggerLoadCheck();
+            // 清理线程
+            CleanupFinishedThreads();
+
+        } catch (const std::exception& e) {
+            // 明确问题的异常
+        } catch (...) {
+            // 未知原因的异常
+        }
+    }
+}
+
+// 清理已结束线程
+void ThreadPool::CleanupFinishedThreads() {
+    return;
 }
 
 // 判断是否可以添加新任务
