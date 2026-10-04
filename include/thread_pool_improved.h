@@ -160,6 +160,10 @@ public:
     // ==========动态线程管理相关公共方法==========
     // 触发负载检查
     void TriggerLoadCheck();
+    size_t GetCurrentThreadCount() const { return current_threads_.load(); }
+    size_t GetCoreThreadCount() const { return config_.core_threads; }
+    size_t GetMaxThreadCount() const { return config_.max_threads; }
+    size_t GetWorkersCount() const { return workers_.size(); }
 
 private:
     // 工作线程主循环函数

@@ -93,8 +93,19 @@ void ThreadPool::Stop() {
         return;
     }
 
+    // 停止负责均衡检查线程
+    if (config_.enable_dynamic_threads) {
+        load_balancer_stop_ = true;
+    }
+
     // 唤醒所有等待的线程 让他们处理完剩余任务
     queue_condition_.notify_all();
+    wait_condition_.notify_all();
+
+    // 等待负载均衡线程结束
+    if (config_.enable_dynamic_threads && load_balancer_thread_.joinable()) {
+        load_balancer_thread_.join();
+    }
 
     // 等待所有工作线程结束
     size_t joined_count = 0;
@@ -256,8 +267,11 @@ void ThreadPool::WorkerLoop() {
             // 等待任务或停止信号
             if (config_.enable_dynamic_threads && !stop_) {
                 // 启用动态线程管理 且 不处于停止时
-                queue_condition_.wait_for(lock, config_.thread_idle_timeout, [this] {
-                    return task_queue_.Size() > 0;  // 任务队列有任务时才继续，否则超时等待
+                queue_condition_.wait_for(lock, config_.thread_idle_timeout, 
+                    [this, &thread_index] {
+                        // 任务队列有任务时才继续，否则超时等待
+                        return (task_queue_.Size() > 0) 
+                        || (thread_index != SIZE_MAX && thread_should_exit_[thread_index]->load());
                 });
             } else {
                 // 不启用动态线程管理 或 处于停止时
@@ -350,10 +364,6 @@ void ThreadPool::CleanupFinishedThreads() {
     for (size_t i = 0; i < workers_.size(); ++i) {
         // 检查当前线程是否可被清理 且 当前线程可join
         if (thread_should_exit_[i]->load() && workers_[i].joinable()) {
-            // 安全性检查 检查线程是否已经结束（此处存疑，什么场景下会出现）
-            if (workers_[i].get_id() == std::thread::id{}) {
-                continue;
-            }
             // 等待线程结束
             try {
                 workers_[i].join();
@@ -437,7 +447,7 @@ bool ThreadPool::TryRemoveIdleThread() {
             // 标记线程被回收
             thread_should_exit_[i]->store(true);
             // 唤醒线程 让其检查退出标准（此处存疑，现在的代码内，此处的唤醒看不到有什么作用）
-            queue_condition_.notify_all();
+            //queue_condition_.notify_all();
 
             return true;
         }
