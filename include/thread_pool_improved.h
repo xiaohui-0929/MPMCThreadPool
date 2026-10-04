@@ -170,6 +170,14 @@ private:
     void LoadBalancingLoop();
     // 清理已结束线程
     void CleanupFinishedThreads();
+    // 计算负载因子
+    double CalculateLoadFactor() const;
+    // 尝试创建新线程
+    bool TryCreateNewThread();
+    // 尝试回收空闲线程
+    bool TryRemoveIdleThread();
+    // 更新线程活跃度 thread_index为线程在线程容器内的下标索引
+    void UpdateThreadActivity(size_t thread_index);
 
     // 状态控制私有方法
     bool CanAcceptNewTasks() const;     // 检查是否可以接受新任务
@@ -178,12 +186,14 @@ private:
     // 线程管理
     std::vector<std::thread> workers_;          // 工作线程容器
     std::atomic<bool> stop_{false};             // 停止标志
-    std::atomic<size_t> pending_tasks_{0};       // 待处理任务数
+    std::atomic<size_t> pending_tasks_{0};      // 待处理任务数
+    std::atomic<size_t> active_threads_{0};     // 活跃线程数
 
     // 同步原语
     std::condition_variable queue_condition_;   // 任务队列条件变量
     std::condition_variable wait_condition_;    // 等待条件变量
     std::mutex queue_mutex_;                    // 队列互斥锁
+    std::mutex thread_management_mutex_;        // 线程管理互斥锁
     
     // 配置参数
     size_t max_queue_size_;                     // 最大任务队列大小
