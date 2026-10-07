@@ -107,11 +107,19 @@ struct ThreadPoolStruct {
 
 // 线程池状态
 enum class ThreadPoolState {
-    RUNNING,        // 正常运行状态
-    PAUSED,         // 暂停状态（不接受新任务，已有任务暂停执行）
-    SHUTTING_DOWN,  // 优雅关闭中（不接受新任务，等待现有任务完成）
-    FORCE_STOPPING, // 强制停止中（不接受新任务，尽快停止）
-    STOPPED         // 已停止
+    RUNNING,                // 正常运行状态
+    PAUSED,                 // 暂停状态（不接受新任务，已有任务暂停执行）
+    SHUTTING_DOWN,          // 优雅关闭中（不接受新任务，等待现有任务完成，消费队列）
+    PAUSED_SHUTTING_DOWN,   // 从暂停变为优雅关闭中（不接受新任务，不消费队列）
+    FORCE_STOPPING,         // 强制停止中（不接受新任务，尽快停止）
+    STOPPED                 // 已停止
+};
+
+// 关闭选项
+enum class ShutdownOption {
+    GRACEFUL,       // 优雅关闭 等待所有任务完成
+    FORCE,          // 强制关闭 不等待任务完成
+    TIMEOUT         // 超时关闭 等待指定时间后强制关闭
 };
 
 // 线程池类
@@ -142,8 +150,18 @@ public:
     auto SubmitWithResult(F&& func, Args&&... args)
         -> std::future<typename std::invoke_result_t<F, Args...>>;
 
-    // 停止线程池（立即停止）
-    void Stop();
+    // 停止线程池 drain_queue控制是否执行完任务队列
+    void Stop(bool drain_queue = true);
+
+    // 优雅关闭线程池
+    void Shutdown(ShutdownOption option = ShutdownOption::GRACEFUL, 
+                  std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+
+    // 暂停线程池（暂停任务执行但保持线程活跃）
+    void Pause();
+
+    // 恢复线程池执行
+    void Resume();
 
     // 获取当前队列中的任务数量
     size_t QueueSize();
@@ -154,8 +172,20 @@ public:
     // 等待所有线程执行结束
     void WaitAll();
 
+    // 等待所有线程执行结束（带限时）
+    bool WaitAll(std::chrono::milliseconds timeout);
+
+    // 等待正在执行的任务执行结束
+    void WaitForRunningTasks();
+
     // 检查线程池是否已停止
     bool IsStopped() const { return stop_.load(); }
+
+    // 检查线程池是否暂停
+    bool IsPaused() const { return state_.load() == ThreadPoolState::PAUSED; }
+
+    // 获取线程池状态
+    ThreadPoolState GetState() const { return state_.load(); }
 
     // ==========动态线程管理相关公共方法==========
     // 触发负载检查
@@ -183,8 +213,13 @@ private:
     // 更新线程活跃度 thread_index为线程在线程容器内的下标索引
     void UpdateThreadActivity(size_t thread_index);
 
-    // 状态控制私有方法
-    bool CanAcceptNewTasks() const;     // 检查是否可以接受新任务
+    // ==========状态控制相关私有方法==========
+    // 检查是否可以接受新任务
+    bool CanAcceptNewTasks() const;   
+    // 设置线程池状态  
+    void SetState(ThreadPoolState new_state);   
+    // 强制停止
+    void ForceStop();
 
 private:
     // 线程管理
@@ -192,12 +227,15 @@ private:
     std::atomic<bool> stop_{false};             // 停止标志
     std::atomic<size_t> pending_tasks_{0};      // 待处理任务数
     std::atomic<size_t> active_threads_{0};     // 活跃线程数
+    std::atomic<size_t> running_tasks_{0};      // 正在执行的任务数
 
     // 同步原语
     std::condition_variable queue_condition_;   // 任务队列条件变量
     std::condition_variable wait_condition_;    // 等待条件变量
+    std::condition_variable pause_condition_;   // 暂停条件变量
     std::mutex queue_mutex_;                    // 队列互斥锁
     std::mutex thread_management_mutex_;        // 线程管理互斥锁
+    std::mutex state_mutex_;                    // 状态互斥锁
     
     // 配置参数
     size_t max_queue_size_;                     // 最大任务队列大小

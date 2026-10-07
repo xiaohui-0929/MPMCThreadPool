@@ -11,6 +11,8 @@ ThreadPool测试用例
 using thread_pool_improved::ThreadPool;
 using thread_pool_improved::QueueFullPolicy;
 using thread_pool_improved::ThreadPoolStruct;
+using thread_pool_improved::ThreadPoolState;
+using thread_pool_improved::ShutdownOption;
 
 // ==================基本功能测试======================
 
@@ -862,6 +864,275 @@ TEST_F(DynamicThreadPoolTest, ExtremeLoadConditions) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     
     EXPECT_EQ(completed_tasks.load(), num_tasks);
+}
+
+// ==================状态控制测试======================
+class StateControlTest : public ::testing::Test {
+protected:
+    void SetUp() override {};
+    void TearDown() override {};
+};
+
+// 测试暂停和恢复功能
+TEST_F(StateControlTest, PauseAndResume) {
+    ThreadPool pool(2);
+    
+    // 初始状态应该是RUNNING
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些任务
+    for (int i = 0; i < 5; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    // 暂停线程池
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    EXPECT_TRUE(pool.IsPaused());
+    
+    // 尝试提交新任务应该失败
+    EXPECT_THROW(
+        pool.SubmitWithResult([]() { return 42; }),
+        std::runtime_error
+    );
+    
+    // 记录暂停时的完成任务数
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    int paused_completed = completed_tasks.load();
+    // 暂停时的完成任务数应该小于提交任务数
+    EXPECT_LT(paused_completed, 5);
+    std::cout << paused_completed << std::endl;
+    
+    // 恢复线程池
+    pool.Resume();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    
+    // 等待所有任务完成
+    for (auto& future : futures) {
+        future.wait();
+    }
+    
+    EXPECT_EQ(completed_tasks.load(), 5);
+}
+
+// 测试优雅关闭
+TEST_F(StateControlTest, GracefulShutdown) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些长时间运行的任务
+    for (int i = 0; i < 6; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    // 优雅关闭
+    auto start_time = std::chrono::steady_clock::now();
+    pool.Shutdown(ShutdownOption::GRACEFUL);
+    auto end_time = std::chrono::steady_clock::now();
+    
+    // 验证所有任务都完成了
+    EXPECT_EQ(completed_tasks.load(), 6);
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    
+    // 关闭后提交任务应该失败
+    EXPECT_THROW(
+        pool.SubmitWithResult([]() { return 42; }),
+        std::runtime_error
+    );
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cout << duration.count() << std::endl;
+    
+    // 优雅关闭应该等待所有任务完成，所以时间应该合理
+    EXPECT_GE(duration.count(), 100); // 至少等待一些时间
+}
+
+// 测试超时关闭
+TEST_F(StateControlTest, TimeoutShutdown) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些长时间运行的任务
+    for (int i = 0; i < 4; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // 超时关闭（300ms超时）
+    auto start_time = std::chrono::steady_clock::now();
+    pool.Shutdown(ShutdownOption::TIMEOUT, std::chrono::milliseconds(300));
+    auto end_time = std::chrono::steady_clock::now();
+    
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cout << duration.count() << std::endl;
+    
+    // 超时关闭应该在超时时间左右完成
+    EXPECT_GE(duration.count(), 250);
+    EXPECT_LT(duration.count(), 550);
+    
+    // 由于超时，可能有一些任务没有完成
+    std::cout << completed_tasks.load() << std::endl;
+    EXPECT_LE(completed_tasks.load(), 4);
+}
+
+// 测试强制停止
+TEST_F(StateControlTest, ForceShutdown) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些长时间运行的任务
+    for (int i = 0; i < 6; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // 强制停止
+    auto start_time = std::chrono::steady_clock::now();
+    pool.Shutdown(ShutdownOption::FORCE);
+    auto end_time = std::chrono::steady_clock::now();
+    
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cout << duration.count() << std::endl;
+    
+    // 强制停止应该很快完成
+    EXPECT_LT(duration.count(), 550);
+    
+    // 可能有一些任务没有完成
+    std::cout << completed_tasks.load() << std::endl;
+    EXPECT_LE(completed_tasks.load(), 6);
+}
+
+// 测试暂停状态下的关闭
+TEST_F(StateControlTest, ShutdownFromPausedState) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些任务
+    for (int i = 0; i < 4; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 暂停线程池
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+
+    // 从暂停状态优雅关闭
+    pool.Shutdown(ShutdownOption::GRACEFUL);
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+
+    // 验证暂停的正确行为：
+    // - 只有正在执行的任务会完成（最多2个，因为有2个工作线程）
+    // - 队列中等待的任务不会被执行
+    // - 至少会有1个任务完成（因为50ms等待时间足够至少启动1个任务）
+    int completed = completed_tasks.load();
+    EXPECT_GE(completed, 1);  // 至少1个任务完成
+    EXPECT_LE(completed, 2);  // 最多2个任务完成（正在执行的任务）
+}
+
+// 测试状态查询接口
+TEST_F(StateControlTest, StateQuery) {
+    ThreadPool pool(2);
+    
+    // 测试初始状态
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    EXPECT_FALSE(pool.IsStopped());
+    
+    // 测试暂停状态
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    EXPECT_TRUE(pool.IsPaused());
+    EXPECT_FALSE(pool.IsStopped());
+    
+    // 测试恢复状态
+    pool.Resume();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    EXPECT_FALSE(pool.IsStopped());
+    
+    // 测试停止状态
+    pool.Stop();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    EXPECT_FALSE(pool.IsPaused());
+    EXPECT_TRUE(pool.IsStopped());
+}
+
+// 测试重复操作的幂等性
+TEST_F(StateControlTest, IdempotentOperations) {
+    ThreadPool pool(2);
+    
+    // 重复暂停
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    pool.Pause(); // 再次暂停
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    
+    // 重复恢复
+    pool.Resume();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    pool.Resume(); // 再次恢复
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    
+    // 重复关闭
+    pool.Shutdown(ShutdownOption::GRACEFUL);
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    pool.Shutdown(ShutdownOption::GRACEFUL); // 再次关闭
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
 }
 
 
