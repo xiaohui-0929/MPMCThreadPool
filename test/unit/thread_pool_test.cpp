@@ -555,6 +555,13 @@ TEST_F(DynamicThreadPoolTest, DynamicThreadCreation) {
     }
 
     EXPECT_EQ(completed_tasks.load(), 10);
+
+    // 获取统计信息
+    auto stats = pool.GetStats();
+    EXPECT_GT(stats.threads_created, config.core_threads);
+    EXPECT_GT(stats.peak_threads, config.core_threads);
+    EXPECT_EQ(stats.tasks_completed, 10);
+    EXPECT_EQ(stats.tasks_failed, 0);
 }
 
 // 测试线程空闲回收
@@ -603,6 +610,67 @@ TEST_F(DynamicThreadPoolTest, ThreadIdleTimeoutRecycling) {
     // 验证线程确实被回收了
     EXPECT_LT(after_recycle_threads, peak_threads);
     EXPECT_GE(after_recycle_threads, config.core_threads);
+
+    // 验证统计信息
+    auto stats = pool.GetStats();
+    EXPECT_GT(stats.threads_created, config.core_threads);
+    EXPECT_GT(stats.threads_destroyed, 0); // 应该有线程被销毁
+    EXPECT_EQ(stats.peak_threads, peak_threads);
+}
+
+// 测试线程回收的统计信息准确性
+TEST_F(DynamicThreadPoolTest, ThreadRecyclingStatistics) {
+    auto config = CreateDynamicConfig();
+    config.thread_idle_timeout = std::chrono::milliseconds(150);
+    config.min_idle_time_for_removal = std::chrono::milliseconds(100);
+    config.max_consecutive_idle_checks = 2;
+    config.load_check_interval = std::chrono::milliseconds(50);
+    
+    ThreadPool pool(config);
+    
+    // 获取初始统计信息
+    auto initial_stats = pool.GetStats();
+    EXPECT_EQ(initial_stats.threads_created, config.core_threads);
+    EXPECT_EQ(initial_stats.threads_destroyed, 0);
+    EXPECT_EQ(initial_stats.peak_threads, config.core_threads);
+    
+    std::vector<std::future<void>> futures;
+    
+    // 创建负载，触发线程创建
+    for (int i = 0; i < 15; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            })
+        );
+    }
+    
+    // 等待线程创建
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    auto peak_stats = pool.GetStats();
+    size_t created_threads = peak_stats.threads_created;
+    size_t peak_count = peak_stats.peak_threads;
+    
+    EXPECT_GT(created_threads, config.core_threads);
+    EXPECT_GT(peak_count, config.core_threads);
+    
+    // 等待所有任务完成
+    for (auto& future : futures) {
+        future.wait();
+    }
+    
+    // 等待线程回收
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    
+    auto final_stats = pool.GetStats();
+    
+    // 验证统计信息
+    EXPECT_EQ(final_stats.threads_created, created_threads); // 创建数应该保持不变
+    EXPECT_GT(final_stats.threads_destroyed, 0); // 应该有线程被销毁
+    EXPECT_EQ(final_stats.peak_threads, peak_count); // 峰值应该保持不变
+    EXPECT_LE(pool.GetCurrentThreadCount(), peak_count); // 当前线程数应该小于等于峰值
+    EXPECT_GE(pool.GetCurrentThreadCount(), config.core_threads); // 不应少于核心线程数
 }
 
 // 测试线程回收的边界条件
@@ -730,6 +798,62 @@ TEST_F(DynamicThreadPoolTest, MultipleCreateRecycleCycles) {
         // 每轮回收后都应该接近核心线程数
         EXPECT_LE(recycle_threads[i], config.core_threads + 1);
     }
+
+    auto final_stats = pool.GetStats();
+    
+    EXPECT_GT(final_stats.threads_destroyed, 0);
+}
+
+// 测试负载感知的线程调整
+TEST_F(DynamicThreadPoolTest, LoadAwareThreadAdjustment) {
+    auto config = CreateDynamicConfig();
+    ThreadPool pool(config);
+    
+    // 测试低负载情况 - 应该保持核心线程数
+    std::atomic<int> completed_tasks{0};
+    
+    auto future1 = pool.SubmitWithResult([&completed_tasks]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        completed_tasks.fetch_add(1);
+    });
+    
+    future1.wait();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    size_t low_load_threads = pool.GetCurrentThreadCount();
+    EXPECT_EQ(low_load_threads, config.core_threads);
+    
+    // 测试高负载情况 - 应该创建更多线程
+    std::vector<std::future<void>> high_load_futures;
+    for (int i = 0; i < 12; ++i) {
+        high_load_futures.push_back(
+            pool.SubmitWithResult([&completed_tasks]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待负载均衡器反应
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    
+    size_t high_load_threads = pool.GetCurrentThreadCount();
+    EXPECT_GT(high_load_threads, low_load_threads);
+    EXPECT_LE(high_load_threads, config.max_threads);
+    
+    // 等待所有任务完成
+    for (auto& future : high_load_futures) {
+        future.wait();
+    }
+    
+    // 验证负载因子计算
+    auto stats = pool.GetStats();
+    EXPECT_GE(stats.load_factor, 0.0);
+    EXPECT_LE(stats.load_factor, 1.0);
+    
+    std::cout << "负载测试 - 低负载线程数: " << low_load_threads 
+              << ", 高负载线程数: " << high_load_threads 
+              << ", 负载因子: " << stats.load_factor << std::endl;
 }
 
 // 测试手动触发负载检查
@@ -767,6 +891,67 @@ TEST_F(DynamicThreadPoolTest, ManualLoadCheck) {
     
     std::cout << "手动负载检查 - 初始: " << initial_threads 
               << ", 检查后: " << after_check_threads << std::endl;
+}
+
+// 测试线程池统计信息
+TEST_F(DynamicThreadPoolTest, StatisticsCollection) {
+    auto config = CreateDynamicConfig();
+    ThreadPool pool(config);
+    
+    // 初始统计信息
+    auto initial_stats = pool.GetStats();
+    EXPECT_EQ(initial_stats.tasks_completed, 0);
+    EXPECT_EQ(initial_stats.tasks_failed, 0);
+    EXPECT_EQ(initial_stats.threads_created, config.core_threads);
+    EXPECT_EQ(initial_stats.threads_destroyed, 0);
+    EXPECT_EQ(initial_stats.peak_threads, config.core_threads);
+    
+    std::atomic<int> task_counter{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交成功任务
+    for (int i = 0; i < 5; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&task_counter]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                task_counter.fetch_add(1);
+            })
+        );
+    }
+    
+    // 提交失败任务
+    for (int i = 0; i < 2; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&task_counter]() {
+                task_counter.fetch_add(1);
+                throw std::runtime_error("测试异常");
+            })
+        );
+    }
+    
+    // 等待所有任务完成
+    for (size_t i = 0; i < futures.size(); ++i) {
+        try {
+            futures[i].wait();
+        } catch (...) {
+            // 忽略异常，只关心统计
+        }
+    }
+    
+    // 等待统计信息更新
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    auto final_stats = pool.GetStats();
+    
+    EXPECT_EQ(final_stats.tasks_completed, 5);  // 成功的任务
+    EXPECT_EQ(final_stats.tasks_failed, 2);    // 失败的任务
+    EXPECT_GT(final_stats.avg_task_time_ms, 0); // 平均执行时间
+    EXPECT_GE(final_stats.peak_threads, config.core_threads);
+    
+    std::cout << "统计信息 - 成功: " << final_stats.tasks_completed 
+              << ", 失败: " << final_stats.tasks_failed 
+              << ", 平均时间: " << final_stats.avg_task_time_ms << "ms"
+              << ", 峰值线程: " << final_stats.peak_threads << std::endl;
 }
 
 // 测试动态线程管理与静态线程池的性能对比
@@ -864,6 +1049,15 @@ TEST_F(DynamicThreadPoolTest, ExtremeLoadConditions) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     
     EXPECT_EQ(completed_tasks.load(), num_tasks);
+
+    auto stats = pool.GetStats();
+    EXPECT_EQ(stats.tasks_completed, num_tasks);
+    EXPECT_EQ(stats.tasks_failed, 0);
+    EXPECT_LE(stats.peak_threads, config.max_threads);
+    
+    std::cout << "极限测试 - 完成任务: " << stats.tasks_completed 
+              << ", 峰值线程: " << stats.peak_threads 
+              << ", 平均时间: " << stats.avg_task_time_ms << "ms" << std::endl;
 }
 
 // ==================状态控制测试======================

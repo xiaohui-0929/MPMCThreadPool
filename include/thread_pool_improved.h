@@ -126,6 +126,26 @@ enum class ShutdownOption {
 class ThreadPool {
 public:
 
+    struct Stats {
+        size_t tasks_completed = 0;     // 已完成任务数
+        size_t tasks_failed = 0;        // 失败任务数
+        double avg_task_time_ms = 0.0;  // 平均任务执行时间（毫秒）
+        size_t active_threads = 0;      // 当前活跃线程数
+        size_t peak_threads = 0;        // 峰值线程数
+        size_t threads_created = 0;     // 总创建线程数
+        size_t threads_destroyed = 0;   // 总销毁线程数
+        double load_factor = 0.0;       // 当前负载因子
+
+        // 队列使用率相关统计
+        size_t current_queue_size = 0;      // 当前队列中的任务数
+        size_t max_queue_size = 0;          // 队列最大容量
+        double queue_usage_rate = 0.0;      // 当前队列使用率 (0.0-1.0)
+        size_t peak_queue_size = 0;         // 队列峰值大小
+        double peak_queue_usage_rate = 0.0; // 队列峰值使用率
+        size_t tasks_discarded = 0;         // 被丢弃的任务数
+        size_t tasks_overwritten = 0;       // 被覆盖的任务数（溢出计数）
+    };
+
     // 定义任务队列别名
     // 元素使用TaskBase的独占智能指针 保证任务所有权归属于线程池
     using queue_type = MPMCBlockingQueue<std::unique_ptr<TaskBase>>;
@@ -186,6 +206,9 @@ public:
 
     // 获取线程池状态
     ThreadPoolState GetState() const { return state_.load(); }
+
+    // 获取线程池统计信息
+    Stats GetStats() const;
 
     // ==========动态线程管理相关公共方法==========
     // 触发负载检查
@@ -253,6 +276,10 @@ private:
     std::vector<std::unique_ptr<std::atomic<bool>>> thread_should_exit_;    // 线程退出标准
     std::thread load_balancer_thread_;                                      // 负载均衡线程
     std::atomic<bool> load_balancer_stop_{false};                           // 负载均衡线程停止标志
+
+    // ==========统计信息相关变量==========
+    mutable std::mutex stats_mutex_;            // 统计信息互斥锁
+    Stats stats_;                               // 统计信息
 };
 
 // 模板函数SubmitWithResult实现

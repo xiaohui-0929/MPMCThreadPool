@@ -45,6 +45,8 @@ ThreadPool::ThreadPool(
     }
 
     current_threads_ = thread_count;
+    stats_.peak_threads = thread_count;
+    stats_.threads_created = thread_count;
 }
 
 ThreadPool::ThreadPool(const ThreadPoolStruct& config) 
@@ -75,6 +77,8 @@ ThreadPool::ThreadPool(const ThreadPoolStruct& config)
     }
 
     current_threads_ = config_.core_threads;
+    stats_.peak_threads = config_.core_threads;
+    stats_.threads_created = config_.core_threads;
 
     // 启动负载均衡线程
     if (config_.enable_dynamic_threads) {
@@ -520,11 +524,37 @@ void ThreadPool::WorkerLoop() {
             }
 
             try {
+                auto start_time = std::chrono::steady_clock::now();
                 task->Execute();
+                auto end_time = std::chrono::steady_clock::now();
+
+                // 更新统计信息
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+                    double task_time_ms = duration.count() / 1000.0;
+
+                    // 检查任务执行是否成功
+                    if (task->IsExecutionSuccessful()) {
+                        stats_.tasks_completed++;
+                        stats_.avg_task_time_ms = 
+                            (stats_.avg_task_time_ms * (stats_.tasks_completed - 1) + task_time_ms) / stats_.tasks_completed;
+                    } else {
+                        stats_.tasks_failed++;
+                    }
+                }
             } catch (const std::exception& e) {
-                // 捕获异常    
+                // 捕获异常 
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.tasks_failed++;
+                }   
             } catch (...) {
                 // 捕获未知异常
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.tasks_failed++;
+                }  
             }
             // 任务执行完成 更新计数
             running_tasks_--;
@@ -534,6 +564,41 @@ void ThreadPool::WorkerLoop() {
             wait_condition_.notify_all();
         }
     }
+}
+
+// 获取线程池统计信息
+ThreadPool::Stats ThreadPool::GetStats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+
+    Stats stats = stats_;
+    stats.active_threads = active_threads_.load();
+    stats.load_factor = CalculateLoadFactor();
+
+    stats.current_queue_size = task_queue_.Size();
+    stats.max_queue_size = max_queue_size_;
+
+    if (max_queue_size_ > 0) {
+        stats.queue_usage_rate = static_cast<double>(stats.current_queue_size) / max_queue_size_;
+    } else {
+        stats.queue_usage_rate = 0.0;   // 无限制队列
+    }
+
+    // 更新峰值队列大小
+    if (stats.current_queue_size > stats_.peak_queue_size) {
+        // 不是很建议用const_cast
+        const_cast<ThreadPool*>(this)->stats_.peak_queue_size = stats.current_queue_size;
+        if (max_queue_size_ > 0) {
+            const_cast<ThreadPool*>(this)->stats_.peak_queue_usage_rate = 
+                static_cast<double>(stats.current_queue_size) / max_queue_size_;
+        }
+    }
+    stats.peak_queue_size = stats_.peak_queue_size;
+    stats.peak_queue_usage_rate = stats_.peak_queue_usage_rate;
+
+    stats.tasks_discarded = task_queue_.DiscardCounter();
+    stats.tasks_overwritten = task_queue_.OverrunCounter();
+
+    return stats;
 }
 
 // 负载均衡循环函数 负责周期性检查线程状态
@@ -573,6 +638,12 @@ void ThreadPool::CleanupFinishedThreads() {
             try {
                 workers_[i].join();
                 current_threads_--;
+
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.threads_destroyed++;
+                }
+
             } catch (const std::exception& e) {
                 // 线程回收时发生异常
             } catch (...) {
@@ -625,6 +696,14 @@ bool ThreadPool::TryCreateNewThread() {
         thread_should_exit_[thread_index]->store(false);
 
         current_threads_++;
+
+        {
+            std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+            stats_.threads_created++;
+            if (current_threads_.load() > stats_.peak_threads) {
+                stats_.peak_threads = current_threads_.load();
+            }
+        }
 
         return true;
 
