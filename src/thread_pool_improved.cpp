@@ -139,6 +139,8 @@ void ThreadPool::WorkerLoop() {
                 task->Execute();
             } catch (const std::exception& e) {
                 // 捕获异常    
+            } catch (...) {
+                // 捕获未知异常
             }
             // 任务执行完成 更新计数
             pending_tasks_--;
