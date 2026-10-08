@@ -370,6 +370,8 @@ void ThreadPool::CleanupFinishedThreads() {
                 current_threads_--;
             } catch (const std::exception& e) {
                 // 线程回收时发生异常
+            } catch (...) {
+                // 出现未知异常
             }
         }
     }
@@ -424,6 +426,9 @@ bool ThreadPool::TryCreateNewThread() {
     } catch (const std::exception& e) {
         // 出现异常
         return false;
+    } catch (...) {
+        // 出现未知异常
+        return false;
     }
 }
 
@@ -446,8 +451,8 @@ bool ThreadPool::TryRemoveIdleThread() {
 
             // 标记线程被回收
             thread_should_exit_[i]->store(true);
-            // 唤醒线程 让其检查退出标准（此处存疑，现在的代码内，此处的唤醒看不到有什么作用）
-            //queue_condition_.notify_all();
+            // 唤醒线程 让其检查退出标准
+            queue_condition_.notify_all();
 
             return true;
         }
@@ -461,6 +466,7 @@ void ThreadPool::UpdateThreadActivity(size_t thread_index) {
     if (thread_index < thread_last_active_.size()) {
         thread_last_active_[thread_index] = std::chrono::steady_clock::now();
         thread_idle_count_[thread_index]->store(0);
+        thread_should_exit_[thread_index]->store(false);
     }
 }
 

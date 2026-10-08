@@ -21,7 +21,7 @@ protected:
 };
 
 // 测试基本功能
-TEST_F(ThreadPoolTest, DISABLED_BasicFunctionality) {
+TEST_F(ThreadPoolTest, BasicFunctionality) {
     ThreadPool pool(2);
 
     std::atomic<size_t> counter{0};         // 共享计数
@@ -46,7 +46,7 @@ TEST_F(ThreadPoolTest, DISABLED_BasicFunctionality) {
 }
 
 // 测试带返回值的任务
-TEST_F(ThreadPoolTest, DISABLED_TaskWithReturnValues) {
+TEST_F(ThreadPoolTest, TaskWithReturnValues) {
     ThreadPool pool(2);
     // 测试不同返回值类型
     auto int_future = pool.SubmitWithResult([]() -> int {
@@ -68,7 +68,7 @@ TEST_F(ThreadPoolTest, DISABLED_TaskWithReturnValues) {
 }
 
 // 测试并发执行
-TEST_F(ThreadPoolTest, DISABLED_ConcurrentExecution) {
+TEST_F(ThreadPoolTest, ConcurrentExecution) {
     const int num_threads = 4;
     const int num_tasks = 100;
 
@@ -109,7 +109,7 @@ TEST_F(ThreadPoolTest, DISABLED_ConcurrentExecution) {
 }
 
 // 测试异常处理
-TEST_F(ThreadPoolTest, DISABLED_ExceptionHandling) {
+TEST_F(ThreadPoolTest, ExceptionHandling) {
     ThreadPool pool(2);
     // 提交一个会抛异常的任务
     auto future_1 = pool.SubmitWithResult([]() -> int {
@@ -125,7 +125,7 @@ TEST_F(ThreadPoolTest, DISABLED_ExceptionHandling) {
 }
 
 // 测试线程池停止
-TEST_F(ThreadPoolTest, DISABLED_ThreadPoolStop) {
+TEST_F(ThreadPoolTest, ThreadPoolStop) {
     ThreadPool pool(2);
     std::atomic<int> completed_tasks{0};
     std::vector<std::future<void>> futures;
@@ -165,7 +165,7 @@ TEST_F(ThreadPoolTest, DISABLED_ThreadPoolStop) {
 }
 
 // 测试WaitAll
-TEST_F(ThreadPoolTest, DISABLED_WaitAllFunctionality) {
+TEST_F(ThreadPoolTest, WaitAllFunctionality) {
     ThreadPool pool(2);
 
     for (int i = 0; i < 10; ++i) {
@@ -183,7 +183,7 @@ TEST_F(ThreadPoolTest, DISABLED_WaitAllFunctionality) {
 }
 
 // 测试性能基准
-TEST_F(ThreadPoolTest, DISABLED_PerformanceBenchmark) {
+TEST_F(ThreadPoolTest, PerformanceBenchmark) {
     const int num_threads = 4;
     const int num_tasks = 1000;
     ThreadPool pool(num_threads);
@@ -220,7 +220,7 @@ TEST_F(ThreadPoolTest, DISABLED_PerformanceBenchmark) {
 }
 
 // 测试内存管理
-TEST_F(ThreadPoolTest, DISABLED_MemoryManagement) {
+TEST_F(ThreadPoolTest, MemoryManagement) {
     std::shared_ptr<int> shared_counter = std::make_shared<int>(0);
 
     {
@@ -243,7 +243,7 @@ TEST_F(ThreadPoolTest, DISABLED_MemoryManagement) {
 }
 
 // 测试边界情况
-TEST_F(ThreadPoolTest, DISABLED_EdgeCases) {
+TEST_F(ThreadPoolTest, EdgeCases) {
     EXPECT_THROW(ThreadPool(0), std::invalid_argument);
 
     // 测试单线程池
@@ -260,7 +260,7 @@ TEST_F(ThreadPoolTest, DISABLED_EdgeCases) {
 }
 
 // 测试队列大小查询
-TEST_F(ThreadPoolTest, DISABLED_QueueSizeQuery) {
+TEST_F(ThreadPoolTest, QueueSizeQuery) {
     ThreadPool pool(1, 10);
 
     EXPECT_EQ(pool.QueueSize(), 0);
@@ -288,7 +288,7 @@ TEST_F(ThreadPoolTest, DISABLED_QueueSizeQuery) {
 }
 
 // 测试大量任务
-TEST_F(ThreadPoolTest, DISABLED_LargeNumberOfTasks) {
+TEST_F(ThreadPoolTest, LargeNumberOfTasks) {
     const int num_tasks = 10000;
     ThreadPool pool(4);
 
@@ -321,7 +321,7 @@ protected:
 
 // 测试阻塞策略 - 队列满时应阻塞
 
-TEST_F(QueuePolicyTest, DISABLED_BlockPolicyTest) {
+TEST_F(QueuePolicyTest, BlockPolicyTest) {
     ThreadPool pool(1, 2, QueueFullPolicy::BLOCK);
 
     std::atomic<int> completed_tasks{0};
@@ -388,7 +388,7 @@ TEST_F(QueuePolicyTest, DISABLED_BlockPolicyTest) {
 }
 
 // 测试覆盖策略 - 队列满时应该覆盖最旧的任务
-TEST_F(QueuePolicyTest, DISABLED_OverwritePolicyTest) {
+TEST_F(QueuePolicyTest, OverwritePolicyTest) {
     // 创建一个只有1个线程和队列大小为1的线程池
     ThreadPool pool(1, 1, QueueFullPolicy::OVERWRITE);
     
@@ -432,7 +432,7 @@ TEST_F(QueuePolicyTest, DISABLED_OverwritePolicyTest) {
 }
 
 // 测试丢弃策略 - 队列满时应该丢弃新任务
-TEST_F(QueuePolicyTest, DISABLED_DiscardPolicyTest) {
+TEST_F(QueuePolicyTest, DiscardPolicyTest) {
     // 创建一个只有1个线程和队列大小为1的线程池
     ThreadPool pool(1, 1, QueueFullPolicy::DISCARD);
     
