@@ -93,6 +93,16 @@ struct ThreadPoolStruct {
     size_t max_threads = std::thread::hardware_concurrency() * 2;   // 最大线程数
     size_t max_queue_size = 1000;                                   // 最大队列大小 0表示无限制
     QueueFullPolicy queue_full_policy = QueueFullPolicy::BLOCK;     // 满队列处理策略
+
+    // ==========动态线程管理相关配置==========
+    bool enable_dynamic_threads = true;                             // 是否启用动态线程管理
+    size_t thread_creation_threshold = 2;                           // 触发创建新线程的待处理任务阈值
+    std::chrono::milliseconds thread_idle_timeout{30000};           // 线程空闲超时限制（30s）
+    std::chrono::milliseconds load_check_interval{5000};            // 负载检查间隔（5s）
+    double scale_up_threshold = 0.8;                                // 扩容阈值（活跃线程比例）
+    double scale_down_threshold = 0.3;                              // 缩容阈值（活跃线程比例）
+    std::chrono::milliseconds min_idle_time_for_removal{10000};     // 线程移除前的最小空闲时间（10s）
+    size_t max_consecutive_idle_checks = 3;                         // 线程移除前的最大连续空闲次数
 };
 
 // 线程池状态
@@ -116,6 +126,9 @@ public:
     ThreadPool(size_t thread_count = std::thread::hardware_concurrency(),
                size_t max_queue_size = 1000,
                QueueFullPolicy queue_policy = QueueFullPolicy::BLOCK);
+
+    // 构造函数 使用配置
+    explicit ThreadPool(const ThreadPoolStruct& config);
     
     // 析构函数
     ~ThreadPool();
@@ -144,9 +157,31 @@ public:
     // 检查线程池是否已停止
     bool IsStopped() const { return stop_.load(); }
 
+    // ==========动态线程管理相关公共方法==========
+    // 触发负载检查
+    void TriggerLoadCheck();
+    size_t GetCurrentThreadCount() const { return current_threads_.load(); }
+    size_t GetCoreThreadCount() const { return config_.core_threads; }
+    size_t GetMaxThreadCount() const { return config_.max_threads; }
+    size_t GetWorkersCount() const { return workers_.size(); }
+
 private:
     // 工作线程主循环函数
     void WorkerLoop();
+
+    // ==========动态线程管理相关私有方法==========
+    // 负载均衡主循环函数
+    void LoadBalancingLoop();
+    // 清理已结束线程
+    void CleanupFinishedThreads();
+    // 计算负载因子
+    double CalculateLoadFactor() const;
+    // 尝试创建新线程
+    bool TryCreateNewThread();
+    // 尝试回收空闲线程
+    bool TryRemoveIdleThread();
+    // 更新线程活跃度 thread_index为线程在线程容器内的下标索引
+    void UpdateThreadActivity(size_t thread_index);
 
     // 状态控制私有方法
     bool CanAcceptNewTasks() const;     // 检查是否可以接受新任务
@@ -155,22 +190,31 @@ private:
     // 线程管理
     std::vector<std::thread> workers_;          // 工作线程容器
     std::atomic<bool> stop_{false};             // 停止标志
-    std::atomic<size_t> pending_tasks_{0};       // 待处理任务数
+    std::atomic<size_t> pending_tasks_{0};      // 待处理任务数
+    std::atomic<size_t> active_threads_{0};     // 活跃线程数
 
     // 同步原语
     std::condition_variable queue_condition_;   // 任务队列条件变量
     std::condition_variable wait_condition_;    // 等待条件变量
     std::mutex queue_mutex_;                    // 队列互斥锁
+    std::mutex thread_management_mutex_;        // 线程管理互斥锁
     
     // 配置参数
     size_t max_queue_size_;                     // 最大任务队列大小
     queue_type task_queue_;                     // 任务队列
     QueueFullPolicy queue_policy_;              // 满队列处理策略
     std::atomic<size_t> current_threads_{0};    // 当前线程数
+    ThreadPoolStruct config_;                   // 配置参数结构体
 
     // 线程池状态（原子变量）
     std::atomic<ThreadPoolState> state_{ThreadPoolState::RUNNING};
 
+    // ==========动态线程管理相关变量==========
+    std::vector<std::chrono::steady_clock::time_point> thread_last_active_; // 线程最后活跃时间
+    std::vector<std::unique_ptr<std::atomic<size_t>>> thread_idle_count_;   // 线程空闲次数
+    std::vector<std::unique_ptr<std::atomic<bool>>> thread_should_exit_;    // 线程退出标准
+    std::thread load_balancer_thread_;                                      // 负载均衡线程
+    std::atomic<bool> load_balancer_stop_{false};                           // 负载均衡线程停止标志
 };
 
 // 模板函数SubmitWithResult实现
