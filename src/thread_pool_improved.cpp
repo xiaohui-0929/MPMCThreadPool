@@ -270,7 +270,7 @@ void ThreadPool::WorkerLoop() {
                 queue_condition_.wait_for(lock, config_.thread_idle_timeout, 
                     [this, &thread_index] {
                         // 任务队列有任务时才继续，否则超时等待
-                        return (task_queue_.Size() > 0) 
+                        return stop_ || (task_queue_.Size() > 0) 
                         || (thread_index != SIZE_MAX && thread_should_exit_[thread_index]->load());
                 });
             } else {
