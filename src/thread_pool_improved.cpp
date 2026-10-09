@@ -3,8 +3,6 @@
 */
 #include "thread_pool_improved.h"
 
-#include <iostream>
-
 namespace thread_pool_improved {
 
 // 基础含参构造函数
@@ -234,6 +232,9 @@ bool ThreadPool::Submit(std::unique_ptr<TaskBase> task) {
             case ThreadPoolState::SHUTTING_DOWN:
                 state_str = "关闭中";
                 break;
+            case ThreadPoolState::PAUSED_SHUTTING_DOWN:
+                state_str = "由暂停状态关闭中";
+                break;
             case ThreadPoolState::FORCE_STOPPING:
                 state_str = "强制停止中";
                 break;
@@ -438,7 +439,12 @@ void ThreadPool::WorkerLoop() {
                 lock.lock();
                 ThreadPoolState resumed_state = state_.load();
                 // 检查恢复后的状态
-                if (resumed_state == ThreadPoolState::SHUTTING_DOWN) {
+                // 暂停后恢复的状态可能有三种
+                // 1. 继续恢复运行 RUNNING 
+                // 2. 通过Stop关闭（手动调用或析构触发） SHUTTING_DOWN 线程直接返回 剩余任务不再执行
+                // 3. 调用ShutDown关闭 PAUSED_SHUTTING_DOWN 线程直接返回 剩余任务不再执行
+                if (resumed_state == ThreadPoolState::SHUTTING_DOWN ||
+                    resumed_state == ThreadPoolState::PAUSED_SHUTTING_DOWN) {
                     // 优雅关闭状态下 不再执行后续任务
                     return;
                 } else if (resumed_state == ThreadPoolState::RUNNING) {
@@ -806,11 +812,13 @@ void ThreadPool::ForceStop() {
     for (auto& worker : workers_) {
         if (worker.joinable()) {
             try {
-                // 使用join
+                // 使用join 使用detach的话会导致测试用例受到干扰
                 worker.join();
                 joined_count++;
             } catch (const std::exception& e) {
                 // 日志记录异常
+            } catch (...) {
+                // 未知异常
             }
         }
     }
