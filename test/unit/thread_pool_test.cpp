@@ -11,6 +11,8 @@ ThreadPool测试用例
 using thread_pool_improved::ThreadPool;
 using thread_pool_improved::QueueFullPolicy;
 using thread_pool_improved::ThreadPoolStruct;
+using thread_pool_improved::ThreadPoolState;
+using thread_pool_improved::ShutdownOption;
 
 // ==================基本功能测试======================
 
@@ -553,6 +555,13 @@ TEST_F(DynamicThreadPoolTest, DynamicThreadCreation) {
     }
 
     EXPECT_EQ(completed_tasks.load(), 10);
+
+    // 获取统计信息
+    auto stats = pool.GetStats();
+    EXPECT_GT(stats.threads_created, config.core_threads);
+    EXPECT_GT(stats.peak_threads, config.core_threads);
+    EXPECT_EQ(stats.tasks_completed, 10);
+    EXPECT_EQ(stats.tasks_failed, 0);
 }
 
 // 测试线程空闲回收
@@ -601,6 +610,67 @@ TEST_F(DynamicThreadPoolTest, ThreadIdleTimeoutRecycling) {
     // 验证线程确实被回收了
     EXPECT_LT(after_recycle_threads, peak_threads);
     EXPECT_GE(after_recycle_threads, config.core_threads);
+
+    // 验证统计信息
+    auto stats = pool.GetStats();
+    EXPECT_GT(stats.threads_created, config.core_threads);
+    EXPECT_GT(stats.threads_destroyed, 0); // 应该有线程被销毁
+    EXPECT_EQ(stats.peak_threads, peak_threads);
+}
+
+// 测试线程回收的统计信息准确性
+TEST_F(DynamicThreadPoolTest, ThreadRecyclingStatistics) {
+    auto config = CreateDynamicConfig();
+    config.thread_idle_timeout = std::chrono::milliseconds(150);
+    config.min_idle_time_for_removal = std::chrono::milliseconds(100);
+    config.max_consecutive_idle_checks = 2;
+    config.load_check_interval = std::chrono::milliseconds(50);
+    
+    ThreadPool pool(config);
+    
+    // 获取初始统计信息
+    auto initial_stats = pool.GetStats();
+    EXPECT_EQ(initial_stats.threads_created, config.core_threads);
+    EXPECT_EQ(initial_stats.threads_destroyed, 0);
+    EXPECT_EQ(initial_stats.peak_threads, config.core_threads);
+    
+    std::vector<std::future<void>> futures;
+    
+    // 创建负载，触发线程创建
+    for (int i = 0; i < 15; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            })
+        );
+    }
+    
+    // 等待线程创建
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    auto peak_stats = pool.GetStats();
+    size_t created_threads = peak_stats.threads_created;
+    size_t peak_count = peak_stats.peak_threads;
+    
+    EXPECT_GT(created_threads, config.core_threads);
+    EXPECT_GT(peak_count, config.core_threads);
+    
+    // 等待所有任务完成
+    for (auto& future : futures) {
+        future.wait();
+    }
+    
+    // 等待线程回收
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    
+    auto final_stats = pool.GetStats();
+    
+    // 验证统计信息
+    EXPECT_EQ(final_stats.threads_created, created_threads); // 创建数应该保持不变
+    EXPECT_GT(final_stats.threads_destroyed, 0); // 应该有线程被销毁
+    EXPECT_EQ(final_stats.peak_threads, peak_count); // 峰值应该保持不变
+    EXPECT_LE(pool.GetCurrentThreadCount(), peak_count); // 当前线程数应该小于等于峰值
+    EXPECT_GE(pool.GetCurrentThreadCount(), config.core_threads); // 不应少于核心线程数
 }
 
 // 测试线程回收的边界条件
@@ -728,6 +798,62 @@ TEST_F(DynamicThreadPoolTest, MultipleCreateRecycleCycles) {
         // 每轮回收后都应该接近核心线程数
         EXPECT_LE(recycle_threads[i], config.core_threads + 1);
     }
+
+    auto final_stats = pool.GetStats();
+    
+    EXPECT_GT(final_stats.threads_destroyed, 0);
+}
+
+// 测试负载感知的线程调整
+TEST_F(DynamicThreadPoolTest, LoadAwareThreadAdjustment) {
+    auto config = CreateDynamicConfig();
+    ThreadPool pool(config);
+    
+    // 测试低负载情况 - 应该保持核心线程数
+    std::atomic<int> completed_tasks{0};
+    
+    auto future1 = pool.SubmitWithResult([&completed_tasks]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        completed_tasks.fetch_add(1);
+    });
+    
+    future1.wait();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    size_t low_load_threads = pool.GetCurrentThreadCount();
+    EXPECT_EQ(low_load_threads, config.core_threads);
+    
+    // 测试高负载情况 - 应该创建更多线程
+    std::vector<std::future<void>> high_load_futures;
+    for (int i = 0; i < 12; ++i) {
+        high_load_futures.push_back(
+            pool.SubmitWithResult([&completed_tasks]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待负载均衡器反应
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    
+    size_t high_load_threads = pool.GetCurrentThreadCount();
+    EXPECT_GT(high_load_threads, low_load_threads);
+    EXPECT_LE(high_load_threads, config.max_threads);
+    
+    // 等待所有任务完成
+    for (auto& future : high_load_futures) {
+        future.wait();
+    }
+    
+    // 验证负载因子计算
+    auto stats = pool.GetStats();
+    EXPECT_GE(stats.load_factor, 0.0);
+    EXPECT_LE(stats.load_factor, 1.0);
+    
+    std::cout << "负载测试 - 低负载线程数: " << low_load_threads 
+              << ", 高负载线程数: " << high_load_threads 
+              << ", 负载因子: " << stats.load_factor << std::endl;
 }
 
 // 测试手动触发负载检查
@@ -765,6 +891,67 @@ TEST_F(DynamicThreadPoolTest, ManualLoadCheck) {
     
     std::cout << "手动负载检查 - 初始: " << initial_threads 
               << ", 检查后: " << after_check_threads << std::endl;
+}
+
+// 测试线程池统计信息
+TEST_F(DynamicThreadPoolTest, StatisticsCollection) {
+    auto config = CreateDynamicConfig();
+    ThreadPool pool(config);
+    
+    // 初始统计信息
+    auto initial_stats = pool.GetStats();
+    EXPECT_EQ(initial_stats.tasks_completed, 0);
+    EXPECT_EQ(initial_stats.tasks_failed, 0);
+    EXPECT_EQ(initial_stats.threads_created, config.core_threads);
+    EXPECT_EQ(initial_stats.threads_destroyed, 0);
+    EXPECT_EQ(initial_stats.peak_threads, config.core_threads);
+    
+    std::atomic<int> task_counter{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交成功任务
+    for (int i = 0; i < 5; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&task_counter]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                task_counter.fetch_add(1);
+            })
+        );
+    }
+    
+    // 提交失败任务
+    for (int i = 0; i < 2; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&task_counter]() {
+                task_counter.fetch_add(1);
+                throw std::runtime_error("测试异常");
+            })
+        );
+    }
+    
+    // 等待所有任务完成
+    for (size_t i = 0; i < futures.size(); ++i) {
+        try {
+            futures[i].wait();
+        } catch (...) {
+            // 忽略异常，只关心统计
+        }
+    }
+    
+    // 等待统计信息更新
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    auto final_stats = pool.GetStats();
+    
+    EXPECT_EQ(final_stats.tasks_completed, 5);  // 成功的任务
+    EXPECT_EQ(final_stats.tasks_failed, 2);    // 失败的任务
+    EXPECT_GT(final_stats.avg_task_time_ms, 0); // 平均执行时间
+    EXPECT_GE(final_stats.peak_threads, config.core_threads);
+    
+    std::cout << "统计信息 - 成功: " << final_stats.tasks_completed 
+              << ", 失败: " << final_stats.tasks_failed 
+              << ", 平均时间: " << final_stats.avg_task_time_ms << "ms"
+              << ", 峰值线程: " << final_stats.peak_threads << std::endl;
 }
 
 // 测试动态线程管理与静态线程池的性能对比
@@ -862,6 +1049,284 @@ TEST_F(DynamicThreadPoolTest, ExtremeLoadConditions) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     
     EXPECT_EQ(completed_tasks.load(), num_tasks);
+
+    auto stats = pool.GetStats();
+    EXPECT_EQ(stats.tasks_completed, num_tasks);
+    EXPECT_EQ(stats.tasks_failed, 0);
+    EXPECT_LE(stats.peak_threads, config.max_threads);
+    
+    std::cout << "极限测试 - 完成任务: " << stats.tasks_completed 
+              << ", 峰值线程: " << stats.peak_threads 
+              << ", 平均时间: " << stats.avg_task_time_ms << "ms" << std::endl;
+}
+
+// ==================状态控制测试======================
+class StateControlTest : public ::testing::Test {
+protected:
+    void SetUp() override {};
+    void TearDown() override {};
+};
+
+// 测试暂停和恢复功能
+TEST_F(StateControlTest, PauseAndResume) {
+    ThreadPool pool(2);
+    
+    // 初始状态应该是RUNNING
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些任务
+    for (int i = 0; i < 5; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    // 暂停线程池
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    EXPECT_TRUE(pool.IsPaused());
+    
+    // 尝试提交新任务应该失败
+    EXPECT_THROW(
+        pool.SubmitWithResult([]() { return 42; }),
+        std::runtime_error
+    );
+    
+    // 记录暂停时的完成任务数
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    int paused_completed = completed_tasks.load();
+    // 暂停时的完成任务数应该小于提交任务数
+    EXPECT_LT(paused_completed, 5);
+    std::cout << paused_completed << std::endl;
+    
+    // 恢复线程池
+    pool.Resume();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    
+    // 等待所有任务完成
+    for (auto& future : futures) {
+        future.wait();
+    }
+    
+    EXPECT_EQ(completed_tasks.load(), 5);
+}
+
+// 测试优雅关闭
+TEST_F(StateControlTest, GracefulShutdown) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些长时间运行的任务
+    for (int i = 0; i < 6; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    // 优雅关闭
+    auto start_time = std::chrono::steady_clock::now();
+    pool.Shutdown(ShutdownOption::GRACEFUL);
+    auto end_time = std::chrono::steady_clock::now();
+    
+    // 验证所有任务都完成了
+    EXPECT_EQ(completed_tasks.load(), 6);
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    
+    // 关闭后提交任务应该失败
+    EXPECT_THROW(
+        pool.SubmitWithResult([]() { return 42; }),
+        std::runtime_error
+    );
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cout << duration.count() << std::endl;
+    
+    // 优雅关闭应该等待所有任务完成，所以时间应该合理
+    EXPECT_GE(duration.count(), 100); // 至少等待一些时间
+}
+
+// 测试超时关闭
+TEST_F(StateControlTest, TimeoutShutdown) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些长时间运行的任务
+    for (int i = 0; i < 4; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // 超时关闭（300ms超时）
+    auto start_time = std::chrono::steady_clock::now();
+    pool.Shutdown(ShutdownOption::TIMEOUT, std::chrono::milliseconds(300));
+    auto end_time = std::chrono::steady_clock::now();
+    
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cout << duration.count() << std::endl;
+    
+    // 超时关闭应该在超时时间左右完成
+    EXPECT_GE(duration.count(), 250);
+    EXPECT_LT(duration.count(), 550);
+    
+    // 由于超时，可能有一些任务没有完成
+    std::cout << completed_tasks.load() << std::endl;
+    EXPECT_LE(completed_tasks.load(), 4);
+}
+
+// 测试强制停止
+TEST_F(StateControlTest, ForceShutdown) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些长时间运行的任务
+    for (int i = 0; i < 6; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+    
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // 强制停止
+    auto start_time = std::chrono::steady_clock::now();
+    pool.Shutdown(ShutdownOption::FORCE);
+    auto end_time = std::chrono::steady_clock::now();
+    
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cout << duration.count() << std::endl;
+    
+    // 强制停止应该很快完成
+    EXPECT_LT(duration.count(), 550);
+    
+    // 可能有一些任务没有完成
+    std::cout << completed_tasks.load() << std::endl;
+    EXPECT_LE(completed_tasks.load(), 6);
+}
+
+// 测试暂停状态下的关闭
+TEST_F(StateControlTest, ShutdownFromPausedState) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些任务
+    for (int i = 0; i < 4; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 暂停线程池
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+
+    // 从暂停状态优雅关闭
+    pool.Shutdown(ShutdownOption::GRACEFUL);
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+
+    // 验证暂停的正确行为：
+    // - 只有正在执行的任务会完成（最多2个，因为有2个工作线程）
+    // - 队列中等待的任务不会被执行
+    // - 至少会有1个任务完成（因为50ms等待时间足够至少启动1个任务）
+    int completed = completed_tasks.load();
+    EXPECT_GE(completed, 1);  // 至少1个任务完成
+    EXPECT_LE(completed, 2);  // 最多2个任务完成（正在执行的任务）
+}
+
+// 测试状态查询接口
+TEST_F(StateControlTest, StateQuery) {
+    ThreadPool pool(2);
+    
+    // 测试初始状态
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    EXPECT_FALSE(pool.IsStopped());
+    
+    // 测试暂停状态
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    EXPECT_TRUE(pool.IsPaused());
+    EXPECT_FALSE(pool.IsStopped());
+    
+    // 测试恢复状态
+    pool.Resume();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    EXPECT_FALSE(pool.IsPaused());
+    EXPECT_FALSE(pool.IsStopped());
+    
+    // 测试停止状态
+    pool.Stop();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    EXPECT_FALSE(pool.IsPaused());
+    EXPECT_TRUE(pool.IsStopped());
+}
+
+// 测试重复操作的幂等性
+TEST_F(StateControlTest, IdempotentOperations) {
+    ThreadPool pool(2);
+    
+    // 重复暂停
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    pool.Pause(); // 再次暂停
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+    
+    // 重复恢复
+    pool.Resume();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    pool.Resume(); // 再次恢复
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::RUNNING);
+    
+    // 重复关闭
+    pool.Shutdown(ShutdownOption::GRACEFUL);
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+    pool.Shutdown(ShutdownOption::GRACEFUL); // 再次关闭
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
 }
 
 

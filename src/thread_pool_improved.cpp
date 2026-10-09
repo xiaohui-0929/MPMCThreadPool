@@ -43,6 +43,8 @@ ThreadPool::ThreadPool(
     }
 
     current_threads_ = thread_count;
+    stats_.peak_threads = thread_count;
+    stats_.threads_created = thread_count;
 }
 
 ThreadPool::ThreadPool(const ThreadPoolStruct& config) 
@@ -73,6 +75,8 @@ ThreadPool::ThreadPool(const ThreadPoolStruct& config)
     }
 
     current_threads_ = config_.core_threads;
+    stats_.peak_threads = config_.core_threads;
+    stats_.threads_created = config_.core_threads;
 
     // 启动负载均衡线程
     if (config_.enable_dynamic_threads) {
@@ -85,12 +89,23 @@ ThreadPool::~ThreadPool() {
     Stop();
 }
 
-// 停止线程池（立即停止）
-void ThreadPool::Stop() {
+// 停止线程池
+void ThreadPool::Stop(bool drain_queue) {
     // 防止重复停止
     bool expected = false;  // 期望是false
     if (!stop_.compare_exchange_strong(expected, true)) {
         return;
+    }
+
+    // 将状态设置为优雅关闭 处理完剩余任务
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        
+        if (drain_queue) {
+            SetState(ThreadPoolState::SHUTTING_DOWN);        // 消费队列
+        } else {
+            SetState(ThreadPoolState::PAUSED_SHUTTING_DOWN); // 不消费队列
+        }
     }
 
     // 停止负责均衡检查线程
@@ -101,6 +116,7 @@ void ThreadPool::Stop() {
     // 唤醒所有等待的线程 让他们处理完剩余任务
     queue_condition_.notify_all();
     wait_condition_.notify_all();
+    pause_condition_.notify_all();
 
     // 等待负载均衡线程结束
     if (config_.enable_dynamic_threads && load_balancer_thread_.joinable()) {
@@ -115,14 +131,120 @@ void ThreadPool::Stop() {
             joined_count++;
         }
     }
+
+    // 设置状态为终止
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        SetState(ThreadPoolState::STOPPED);
+    }
+}
+
+ // 优雅关闭线程池
+void ThreadPool::Shutdown(ShutdownOption option, std::chrono::milliseconds timeout) {
+    bool should_proceed = false;
+    ThreadPoolState original_state;
+
+    bool original_paused = false;   // 初始状态为暂停状态
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        original_state = state_.load();
+
+        // 以下状态直接返回
+        if (original_state == ThreadPoolState::STOPPED ||
+            original_state == ThreadPoolState::SHUTTING_DOWN ||
+            original_state == ThreadPoolState::PAUSED_SHUTTING_DOWN ||
+            original_state == ThreadPoolState::FORCE_STOPPING) {
+            return;
+        }
+
+        should_proceed = true;
+
+        // 通过入参option 设置线程池状态
+        switch (option) {
+            case ShutdownOption::GRACEFUL:
+                SetState(ThreadPoolState::SHUTTING_DOWN);
+                break;
+            case ShutdownOption::FORCE:
+                SetState(ThreadPoolState::FORCE_STOPPING);
+                break;
+            case ShutdownOption::TIMEOUT:
+                SetState(ThreadPoolState::SHUTTING_DOWN);
+                break;
+            default:
+                break;
+        }
+
+        // 若初始状态为暂停 则设置状态为PAUSED_SHUTTING_DOWN 唤醒阻塞线程
+        if (original_state == ThreadPoolState::PAUSED) {
+            original_paused = true;
+            SetState(ThreadPoolState::PAUSED_SHUTTING_DOWN);
+            pause_condition_.notify_all();
+            queue_condition_.notify_all();
+        }
+    }
+
+    if (!should_proceed) {
+        return;
+    }
+
+    if (option == ShutdownOption::FORCE) {
+        // 强制停止
+        ForceStop();
+        return;
+    }
+
+    // 超时关闭
+    if (option == ShutdownOption::TIMEOUT) {
+        if (!WaitAll(timeout)) {
+            // 强制停止
+            ForceStop();
+            return;
+        }
+    } else if (option == ShutdownOption::GRACEFUL) {
+        // 优雅关闭
+        if (!original_paused) {
+            WaitAll();
+        } else {
+            // 处理完正在执行的任务
+            WaitForRunningTasks();
+            // 从暂停状态转为优雅关闭 不执行完任务队列
+            Stop(false);
+            return;
+        }
+    }
+
+    // 设置最终停止状态
+    Stop();
 }
 
 // 任务提交函数
 bool ThreadPool::Submit(std::unique_ptr<TaskBase> task) {
+    // 先判断当前状态
+    if (!CanAcceptNewTasks()) {
+        ThreadPoolState current_state = state_.load();
+        std::string state_str;
 
-    // 停止状态下抛出超时异常
-    if (stop_) {
-        throw std::runtime_error("Cannot submit task to thread pool");
+        switch (current_state) {
+            case ThreadPoolState::PAUSED:
+                state_str = "暂停";
+                break;
+            case ThreadPoolState::SHUTTING_DOWN:
+                state_str = "关闭中";
+                break;
+            case ThreadPoolState::PAUSED_SHUTTING_DOWN:
+                state_str = "由暂停状态关闭中";
+                break;
+            case ThreadPoolState::FORCE_STOPPING:
+                state_str = "强制停止中";
+                break;
+            case ThreadPoolState::STOPPED:
+                state_str = "已停止";
+                break;
+            default:
+                state_str = "未知";
+        }
+        throw std::runtime_error("Cannot submit task to thread pool in current state: " + state_str);
     }
 
     bool submitted = false;
@@ -163,6 +285,27 @@ bool ThreadPool::Submit(std::unique_ptr<TaskBase> task) {
     return submitted;
 }
 
+// 暂停线程池
+void ThreadPool::Pause() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    ThreadPoolState current_state = state_.load();
+    if (current_state == ThreadPoolState::RUNNING) {
+        SetState(ThreadPoolState::PAUSED);
+    }
+}
+
+// 恢复线程池
+void ThreadPool::Resume() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+
+    ThreadPoolState current_state = state_.load();
+    if (current_state == ThreadPoolState::PAUSED) {
+        SetState(ThreadPoolState::RUNNING);
+        pause_condition_.notify_all();  // 唤醒等待的线程
+    }
+}
+
 // 获取当前队列中的任务数量
 size_t ThreadPool::QueueSize() {
     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -180,6 +323,22 @@ void ThreadPool::WaitAll() {
     std::unique_lock<std::mutex> lock(queue_mutex_);
     wait_condition_.wait(lock, [this] {
         return pending_tasks_ == 0;
+    });
+}
+
+// 等待所有线程执行结束（带限时）
+bool ThreadPool::WaitAll(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+    return wait_condition_.wait_for(lock, timeout, [this] {
+        return pending_tasks_.load() == 0;
+    });
+}
+
+// 等待正在执行的任务执行结束
+void ThreadPool::WaitForRunningTasks() {
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+    wait_condition_.wait(lock, [this] {
+        return running_tasks_ == 0;
     });
 }
 
@@ -264,6 +423,38 @@ void ThreadPool::WorkerLoop() {
                 return;
             }
 
+            // 检查是否处于暂停状态
+            ThreadPoolState current_pause_state = state_.load();
+            if (current_pause_state == ThreadPoolState::PAUSED) {
+                // 释放队列锁
+                lock.unlock();
+                // 通过pause_condition_阻塞线程
+                {
+                    std::unique_lock<std::mutex> pause_lock(state_mutex_);
+                    pause_condition_.wait(pause_lock, [this] {
+                        return stop_ || state_.load() != ThreadPoolState::PAUSED;
+                    });
+                }
+                // 获取队列锁
+                lock.lock();
+                ThreadPoolState resumed_state = state_.load();
+                // 检查恢复后的状态
+                // 暂停后恢复的状态可能有三种
+                // 1. 继续恢复运行 RUNNING 
+                // 2. 通过Stop关闭（手动调用或析构触发） SHUTTING_DOWN 线程直接返回 剩余任务不再执行
+                // 3. 调用ShutDown关闭 PAUSED_SHUTTING_DOWN 线程直接返回 剩余任务不再执行
+                if (resumed_state == ThreadPoolState::SHUTTING_DOWN ||
+                    resumed_state == ThreadPoolState::PAUSED_SHUTTING_DOWN) {
+                    // 优雅关闭状态下 不再执行后续任务
+                    return;
+                } else if (resumed_state == ThreadPoolState::RUNNING) {
+                    // 恢复到运行状态 继续处理队列任务
+                    if (task_queue_.Size() > 0) {
+                        continue;   // 跳过等待，直接进入下一轮循环获取任务
+                    }
+                }
+            }
+
             // 等待任务或停止信号
             if (config_.enable_dynamic_threads && !stop_) {
                 // 启用动态线程管理 且 不处于停止时
@@ -280,9 +471,21 @@ void ThreadPool::WorkerLoop() {
                 });
             }
 
-            // 停止信号为true 且 没有任务待执行 直接返回线程
-            if (stop_ && task_queue_.Size() == 0) {
+            // 检查关闭状态
+            ThreadPoolState current_state = state_.load();
+
+            // 强制停止 / 暂停关闭：直接退出，不消费队列
+            if (current_state == ThreadPoolState::FORCE_STOPPING ||
+                current_state == ThreadPoolState::PAUSED_SHUTTING_DOWN) {
                 return;
+            }
+
+            // 正常优雅关闭：队列空了才退出
+            if (current_state == ThreadPoolState::SHUTTING_DOWN || stop_) {
+                if (task_queue_.Size() == 0) {
+                    return;
+                }
+                // 否则继续往下取任务
             }
 
             // 获取任务
@@ -315,20 +518,93 @@ void ThreadPool::WorkerLoop() {
         }
         // 执行任务
         if (has_task) {
+            running_tasks_++;   // 增加正在执行的任务计数
+
+            // 强制停止状态下，跳过任务执行
+            ThreadPoolState current_exec_state = state_.load();
+            if (current_exec_state == ThreadPoolState::FORCE_STOPPING) {
+                running_tasks_--;
+                pending_tasks_--;
+                wait_condition_.notify_all();   // 通知 有等待的地方 继续执行
+                return;
+            }
+
             try {
+                auto start_time = std::chrono::steady_clock::now();
                 task->Execute();
+                auto end_time = std::chrono::steady_clock::now();
+
+                // 更新统计信息
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+                    double task_time_ms = duration.count() / 1000.0;
+
+                    // 检查任务执行是否成功
+                    if (task->IsExecutionSuccessful()) {
+                        stats_.tasks_completed++;
+                        stats_.avg_task_time_ms = 
+                            (stats_.avg_task_time_ms * (stats_.tasks_completed - 1) + task_time_ms) / stats_.tasks_completed;
+                    } else {
+                        stats_.tasks_failed++;
+                    }
+                }
             } catch (const std::exception& e) {
-                // 捕获异常    
+                // 捕获异常 
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.tasks_failed++;
+                }   
             } catch (...) {
                 // 捕获未知异常
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.tasks_failed++;
+                }  
             }
             // 任务执行完成 更新计数
+            running_tasks_--;
             pending_tasks_--;
             active_threads_--;
             // 通知 有等待的地方 继续执行
             wait_condition_.notify_all();
         }
     }
+}
+
+// 获取线程池统计信息
+ThreadPool::Stats ThreadPool::GetStats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+
+    Stats stats = stats_;
+    stats.active_threads = active_threads_.load();
+    stats.load_factor = CalculateLoadFactor();
+
+    stats.current_queue_size = task_queue_.Size();
+    stats.max_queue_size = max_queue_size_;
+
+    if (max_queue_size_ > 0) {
+        stats.queue_usage_rate = static_cast<double>(stats.current_queue_size) / max_queue_size_;
+    } else {
+        stats.queue_usage_rate = 0.0;   // 无限制队列
+    }
+
+    // 更新峰值队列大小
+    if (stats.current_queue_size > stats_.peak_queue_size) {
+        // 不是很建议用const_cast
+        const_cast<ThreadPool*>(this)->stats_.peak_queue_size = stats.current_queue_size;
+        if (max_queue_size_ > 0) {
+            const_cast<ThreadPool*>(this)->stats_.peak_queue_usage_rate = 
+                static_cast<double>(stats.current_queue_size) / max_queue_size_;
+        }
+    }
+    stats.peak_queue_size = stats_.peak_queue_size;
+    stats.peak_queue_usage_rate = stats_.peak_queue_usage_rate;
+
+    stats.tasks_discarded = task_queue_.DiscardCounter();
+    stats.tasks_overwritten = task_queue_.OverrunCounter();
+
+    return stats;
 }
 
 // 负载均衡循环函数 负责周期性检查线程状态
@@ -368,6 +644,12 @@ void ThreadPool::CleanupFinishedThreads() {
             try {
                 workers_[i].join();
                 current_threads_--;
+
+                {
+                    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+                    stats_.threads_destroyed++;
+                }
+
             } catch (const std::exception& e) {
                 // 线程回收时发生异常
             } catch (...) {
@@ -420,6 +702,14 @@ bool ThreadPool::TryCreateNewThread() {
         thread_should_exit_[thread_index]->store(false);
 
         current_threads_++;
+
+        {
+            std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+            stats_.threads_created++;
+            if (current_threads_.load() > stats_.peak_threads) {
+                stats_.peak_threads = current_threads_.load();
+            }
+        }
 
         return true;
 
@@ -474,6 +764,70 @@ void ThreadPool::UpdateThreadActivity(size_t thread_index) {
 bool ThreadPool::CanAcceptNewTasks() const {
     ThreadPoolState current_state = state_.load();
     return current_state == ThreadPoolState::RUNNING;
+}
+
+// 设置线程池状态
+void ThreadPool::SetState(ThreadPoolState new_state) {
+    state_.store(new_state);
+}
+
+// 强制停止
+void ThreadPool::ForceStop() {
+    // 防止重复停止
+    bool expected = false;
+    if (!stop_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    // 保险起见 设置状态为强制关闭
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        SetState(ThreadPoolState::FORCE_STOPPING);
+    }
+
+    // 停止负载均衡线程
+    if (config_.enable_dynamic_threads) {
+        load_balancer_stop_ = true;
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        // 所有线程 设置 退出标志
+        for (auto& should_exit : thread_should_exit_) {
+            should_exit->store(true);
+        }
+    }
+
+    queue_condition_.notify_all();
+    wait_condition_.notify_all();
+    pause_condition_.notify_all();
+
+    // 等待负载均衡线程结束
+    if (config_.enable_dynamic_threads && load_balancer_thread_.joinable()) {
+        load_balancer_thread_.join();
+    }
+
+    // 等待所有工作线程结束
+    size_t joined_count = 0;
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            try {
+                // 使用join 使用detach的话会导致测试用例受到干扰
+                worker.join();
+                joined_count++;
+            } catch (const std::exception& e) {
+                // 日志记录异常
+            } catch (...) {
+                // 未知异常
+            }
+        }
+    }
+
+    // 设置状态为终止
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        SetState(ThreadPoolState::STOPPED);
+    }
 }
 
 }
