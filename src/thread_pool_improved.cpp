@@ -443,8 +443,10 @@ void ThreadPool::WorkerLoop() {
                 // 1. 继续恢复运行 RUNNING 
                 // 2. 通过Stop关闭（手动调用或析构触发） SHUTTING_DOWN 线程直接返回 剩余任务不再执行
                 // 3. 调用ShutDown关闭 PAUSED_SHUTTING_DOWN 线程直接返回 剩余任务不再执行
-                if (resumed_state == ThreadPoolState::SHUTTING_DOWN ||
-                    resumed_state == ThreadPoolState::PAUSED_SHUTTING_DOWN) {
+                if (resumed_state == ThreadPoolState::SHUTTING_DOWN){
+                    // SHUTTING_DOWN状态下 先不回收线程
+                    // 避免特殊场景下（Resume后立即ShutDown），线程的意外回收导致卡死
+                } else if (resumed_state == ThreadPoolState::PAUSED_SHUTTING_DOWN) {
                     // 优雅关闭状态下 不再执行后续任务
                     return;
                 } else if (resumed_state == ThreadPoolState::RUNNING) {
@@ -812,8 +814,8 @@ void ThreadPool::ForceStop() {
     for (auto& worker : workers_) {
         if (worker.joinable()) {
             try {
-                // 使用join 使用detach的话会导致测试用例受到干扰
-                worker.join();
+                // 使用detach
+                worker.detach();
                 joined_count++;
             } catch (const std::exception& e) {
                 // 日志记录异常
