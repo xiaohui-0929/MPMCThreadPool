@@ -1164,6 +1164,43 @@ TEST_F(StateControlTest, GracefulShutdown) {
     EXPECT_GE(duration.count(), 100); // 至少等待一些时间
 }
 
+// 测试暂停状态下的关闭
+TEST_F(StateControlTest, ShutdownFromPausedState) {
+    ThreadPool pool(2);
+    
+    std::atomic<int> completed_tasks{0};
+    std::vector<std::future<void>> futures;
+    
+    // 提交一些任务
+    for (int i = 0; i < 4; ++i) {
+        futures.push_back(
+            pool.SubmitWithResult([&completed_tasks, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                completed_tasks.fetch_add(1);
+            })
+        );
+    }
+
+    // 等待一些任务开始执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 暂停线程池
+    pool.Pause();
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
+
+    // 从暂停状态优雅关闭
+    pool.Shutdown(ShutdownOption::GRACEFUL);
+    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
+
+    // 验证暂停的正确行为：
+    // - 只有正在执行的任务会完成（最多2个，因为有2个工作线程）
+    // - 队列中等待的任务不会被执行
+    // - 至少会有1个任务完成（因为50ms等待时间足够至少启动1个任务）
+    int completed = completed_tasks.load();
+    EXPECT_GE(completed, 1);  // 至少1个任务完成
+    EXPECT_LE(completed, 2);  // 最多2个任务完成（正在执行的任务）
+}
+
 // 测试超时关闭
 TEST_F(StateControlTest, TimeoutShutdown) {
     ThreadPool pool(2);
@@ -1196,7 +1233,7 @@ TEST_F(StateControlTest, TimeoutShutdown) {
     
     // 超时关闭应该在超时时间左右完成
     EXPECT_GE(duration.count(), 250);
-    EXPECT_LT(duration.count(), 550);
+    EXPECT_LT(duration.count(), 350);
     
     // 由于超时，可能有一些任务没有完成
     std::cout << completed_tasks.load() << std::endl;
@@ -1234,48 +1271,11 @@ TEST_F(StateControlTest, ForceShutdown) {
     std::cout << duration.count() << std::endl;
     
     // 强制停止应该很快完成
-    EXPECT_LT(duration.count(), 550);
+    EXPECT_LT(duration.count(), 200);
     
     // 可能有一些任务没有完成
     std::cout << completed_tasks.load() << std::endl;
     EXPECT_LE(completed_tasks.load(), 6);
-}
-
-// 测试暂停状态下的关闭
-TEST_F(StateControlTest, ShutdownFromPausedState) {
-    ThreadPool pool(2);
-    
-    std::atomic<int> completed_tasks{0};
-    std::vector<std::future<void>> futures;
-    
-    // 提交一些任务
-    for (int i = 0; i < 4; ++i) {
-        futures.push_back(
-            pool.SubmitWithResult([&completed_tasks, i]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                completed_tasks.fetch_add(1);
-            })
-        );
-    }
-
-    // 等待一些任务开始执行
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // 暂停线程池
-    pool.Pause();
-    EXPECT_EQ(pool.GetState(), ThreadPoolState::PAUSED);
-
-    // 从暂停状态优雅关闭
-    pool.Shutdown(ShutdownOption::GRACEFUL);
-    EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
-
-    // 验证暂停的正确行为：
-    // - 只有正在执行的任务会完成（最多2个，因为有2个工作线程）
-    // - 队列中等待的任务不会被执行
-    // - 至少会有1个任务完成（因为50ms等待时间足够至少启动1个任务）
-    int completed = completed_tasks.load();
-    EXPECT_GE(completed, 1);  // 至少1个任务完成
-    EXPECT_LE(completed, 2);  // 最多2个任务完成（正在执行的任务）
 }
 
 // 测试状态查询接口
