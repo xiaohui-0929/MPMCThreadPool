@@ -107,16 +107,44 @@ struct ThreadPoolStruct {
 
 // 线程池状态
 enum class ThreadPoolState {
-    RUNNING,        // 正常运行状态
-    PAUSED,         // 暂停状态（不接受新任务，已有任务暂停执行）
-    SHUTTING_DOWN,  // 优雅关闭中（不接受新任务，等待现有任务完成）
-    FORCE_STOPPING, // 强制停止中（不接受新任务，尽快停止）
-    STOPPED         // 已停止
+    RUNNING,                // 正常运行状态
+    PAUSED,                 // 暂停状态（不接受新任务，已有任务暂停执行）
+    SHUTTING_DOWN,          // 优雅关闭中（不接受新任务，等待现有任务完成，消费队列）
+    PAUSED_SHUTTING_DOWN,   // 从暂停变为优雅关闭中（不接受新任务，不消费队列）
+    FORCE_STOPPING,         // 强制停止中（不接受新任务，尽快停止）
+    STOPPED                 // 已停止
+};
+
+// 关闭选项
+enum class ShutdownOption {
+    GRACEFUL,       // 优雅关闭 等待所有任务完成
+    FORCE,          // 强制关闭 不等待任务完成
+    TIMEOUT         // 超时关闭 等待指定时间后强制关闭
 };
 
 // 线程池类
 class ThreadPool {
 public:
+
+    struct Stats {
+        size_t tasks_completed = 0;     // 已完成任务数
+        size_t tasks_failed = 0;        // 失败任务数
+        double avg_task_time_ms = 0.0;  // 平均任务执行时间（毫秒）
+        size_t active_threads = 0;      // 当前活跃线程数
+        size_t peak_threads = 0;        // 峰值线程数
+        size_t threads_created = 0;     // 总创建线程数
+        size_t threads_destroyed = 0;   // 总销毁线程数
+        double load_factor = 0.0;       // 当前负载因子
+
+        // 队列使用率相关统计
+        size_t current_queue_size = 0;      // 当前队列中的任务数
+        size_t max_queue_size = 0;          // 队列最大容量
+        double queue_usage_rate = 0.0;      // 当前队列使用率 (0.0-1.0)
+        size_t peak_queue_size = 0;         // 队列峰值大小
+        double peak_queue_usage_rate = 0.0; // 队列峰值使用率
+        size_t tasks_discarded = 0;         // 被丢弃的任务数
+        size_t tasks_overwritten = 0;       // 被覆盖的任务数（溢出计数）
+    };
 
     // 定义任务队列别名
     // 元素使用TaskBase的独占智能指针 保证任务所有权归属于线程池
@@ -142,8 +170,18 @@ public:
     auto SubmitWithResult(F&& func, Args&&... args)
         -> std::future<typename std::invoke_result_t<F, Args...>>;
 
-    // 停止线程池（立即停止）
-    void Stop();
+    // 停止线程池 drain_queue控制是否执行完任务队列
+    void Stop(bool drain_queue = true);
+
+    // 优雅关闭线程池
+    void Shutdown(ShutdownOption option = ShutdownOption::GRACEFUL, 
+                  std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+
+    // 暂停线程池（暂停任务执行但保持线程活跃）
+    void Pause();
+
+    // 恢复线程池执行
+    void Resume();
 
     // 获取当前队列中的任务数量
     size_t QueueSize();
@@ -154,8 +192,23 @@ public:
     // 等待所有线程执行结束
     void WaitAll();
 
+    // 等待所有线程执行结束（带限时）
+    bool WaitAll(std::chrono::milliseconds timeout);
+
+    // 等待正在执行的任务执行结束
+    void WaitForRunningTasks();
+
     // 检查线程池是否已停止
     bool IsStopped() const { return stop_.load(); }
+
+    // 检查线程池是否暂停
+    bool IsPaused() const { return state_.load() == ThreadPoolState::PAUSED; }
+
+    // 获取线程池状态
+    ThreadPoolState GetState() const { return state_.load(); }
+
+    // 获取线程池统计信息
+    Stats GetStats() const;
 
     // ==========动态线程管理相关公共方法==========
     // 触发负载检查
@@ -183,8 +236,13 @@ private:
     // 更新线程活跃度 thread_index为线程在线程容器内的下标索引
     void UpdateThreadActivity(size_t thread_index);
 
-    // 状态控制私有方法
-    bool CanAcceptNewTasks() const;     // 检查是否可以接受新任务
+    // ==========状态控制相关私有方法==========
+    // 检查是否可以接受新任务
+    bool CanAcceptNewTasks() const;   
+    // 设置线程池状态  
+    void SetState(ThreadPoolState new_state);   
+    // 强制停止
+    void ForceStop();
 
 private:
     // 线程管理
@@ -192,12 +250,15 @@ private:
     std::atomic<bool> stop_{false};             // 停止标志
     std::atomic<size_t> pending_tasks_{0};      // 待处理任务数
     std::atomic<size_t> active_threads_{0};     // 活跃线程数
+    std::atomic<size_t> running_tasks_{0};      // 正在执行的任务数
 
     // 同步原语
     std::condition_variable queue_condition_;   // 任务队列条件变量
     std::condition_variable wait_condition_;    // 等待条件变量
+    std::condition_variable pause_condition_;   // 暂停条件变量
     std::mutex queue_mutex_;                    // 队列互斥锁
     std::mutex thread_management_mutex_;        // 线程管理互斥锁
+    std::mutex state_mutex_;                    // 状态互斥锁
     
     // 配置参数
     size_t max_queue_size_;                     // 最大任务队列大小
@@ -215,6 +276,10 @@ private:
     std::vector<std::unique_ptr<std::atomic<bool>>> thread_should_exit_;    // 线程退出标准
     std::thread load_balancer_thread_;                                      // 负载均衡线程
     std::atomic<bool> load_balancer_stop_{false};                           // 负载均衡线程停止标志
+
+    // ==========统计信息相关变量==========
+    mutable std::mutex stats_mutex_;            // 统计信息互斥锁
+    Stats stats_;                               // 统计信息
 };
 
 // 模板函数SubmitWithResult实现
