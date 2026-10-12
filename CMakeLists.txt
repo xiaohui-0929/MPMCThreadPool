@@ -27,6 +27,7 @@ include_directories(include)
 add_library(thread_pool_lib 
     src/thread_pool_improved.cpp
     src/logger.cpp
+    src/thread_pool_config.cpp
 )
 
 # 链接依赖

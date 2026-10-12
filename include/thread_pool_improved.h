@@ -8,6 +8,7 @@
 #include <future>
 #include <vector>
 #include <thread>
+#include <memory>
 
 namespace thread_pool_improved {
 
@@ -157,6 +158,9 @@ public:
 
     // 构造函数 使用配置
     explicit ThreadPool(const ThreadPoolStruct& config);
+
+    // 从JSON配置文件创建线程池
+    static std::unique_ptr<ThreadPool> CreateFromConfig(const std::string& config_path);
     
     // 析构函数
     ~ThreadPool();
@@ -209,6 +213,9 @@ public:
 
     // 获取线程池统计信息
     Stats GetStats() const;
+
+    // 获取队列满时的处理策略
+    QueueFullPolicy GetQueuePolicy() const { return queue_policy_; }
 
     // ==========动态线程管理相关公共方法==========
     // 触发负载检查

@@ -3,6 +3,7 @@
 */
 #include "thread_pool_improved.h"
 #include "logger.h"
+#include "thread_pool_config.h"
 
 namespace thread_pool_improved {
 
@@ -98,6 +99,18 @@ ThreadPool::ThreadPool(const ThreadPoolStruct& config)
     }
 
     LOG_INFO("线程池创建完成，核心线程数: {}", config.core_threads);
+}
+
+// 从JSON配置文件创建线程池
+std::unique_ptr<ThreadPool> ThreadPool::CreateFromConfig(const std::string& config_path) {
+    LOG_INFO("从配置文件创建线程池: {}", config_path);
+
+    ThreadPoolStruct config = ThreadPoolConfig::LoadFromFile(config_path);
+
+    auto pool = std::make_unique<ThreadPool>(config);
+
+    LOG_INFO("成功从配置文件创建线程池");
+    return pool;
 }
 
 // 析构函数
