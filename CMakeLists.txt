@@ -18,6 +18,7 @@ endif()
 # 查找依赖包
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Threads REQUIRED)
+find_package(spdlog REQUIRED)
 
 # 设置头文件路径
 include_directories(include)
@@ -25,11 +26,14 @@ include_directories(include)
 # 创建静态库
 add_library(thread_pool_lib 
     src/thread_pool_improved.cpp
+    src/logger.cpp
+    src/thread_pool_config.cpp
 )
 
 # 链接依赖
 target_link_libraries(thread_pool_lib
     Threads::Threads
+    spdlog::spdlog
 )
 
 

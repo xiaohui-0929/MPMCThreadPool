@@ -4,6 +4,7 @@ ThreadPool测试用例
 */
 
 #include "thread_pool_improved.h"
+#include "logger.h"
 
 #include <gtest/gtest.h>
 
@@ -13,6 +14,9 @@ using thread_pool_improved::QueueFullPolicy;
 using thread_pool_improved::ThreadPoolStruct;
 using thread_pool_improved::ThreadPoolState;
 using thread_pool_improved::ShutdownOption;
+using thread_pool_improved::Logger;
+using thread_pool_improved::LoggerConfig;
+using thread_pool_improved::LogLevel;
 
 // ==================基本功能测试======================
 
@@ -484,7 +488,19 @@ TEST_F(QueuePolicyTest, DiscardPolicyTest) {
 // ==================动态线程管理测试======================
 class DynamicThreadPoolTest : public ::testing::Test {
 protected:
-    void SetUp() override {};
+    void SetUp() override {
+        // 初始化日志系统
+        if (!Logger::GetInstance().IsInitialized()) {
+            LoggerConfig log_config;
+            log_config.name = "test_dynamic_threadpool";
+            log_config.file_path = "../logs/test_dynamic_threadpool.log";
+            log_config.level = LogLevel::DEBUG;
+            log_config.enable_console = false;
+            log_config.enable_file = true;
+            log_config.pattern = "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%n] [线程:%t] %v";
+            Logger::GetInstance().Initialize(log_config);
+        }
+    };
     void TearDown() override {};
 
     // 创建动态线程管理配置
@@ -578,10 +594,14 @@ TEST_F(DynamicThreadPoolTest, ThreadIdleTimeoutRecycling) {
     std::atomic<int> completed_tasks{0};
     std::vector<std::future<void>> futures;
 
+    LOG_INFO("开始线程回收测试 - 核心线程数: {}, 最大线程数: {}", 
+             config.core_threads, config.max_threads);
+
     // 第一阶段：提交大量任务创建额外线程
     for (int i = 0; i < 12; ++i) {
         futures.push_back(
             pool.SubmitWithResult([&completed_tasks, i]() {
+                LOG_DEBUG("执行任务 {}", i);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 completed_tasks.fetch_add(1);
             })
@@ -593,6 +613,7 @@ TEST_F(DynamicThreadPoolTest, ThreadIdleTimeoutRecycling) {
 
     // 查看峰值线程数
     size_t peak_threads = pool.GetCurrentThreadCount();
+    LOG_INFO("峰值线程数: {}", peak_threads);
     EXPECT_GT(peak_threads, config.core_threads);
     EXPECT_LE(peak_threads, config.max_threads);
 
@@ -601,12 +622,16 @@ TEST_F(DynamicThreadPoolTest, ThreadIdleTimeoutRecycling) {
         future.wait();
     }
 
+    LOG_INFO("所有任务完成，已完成任务数: {}", completed_tasks.load());
     EXPECT_EQ(completed_tasks.load(), 12);
 
     // 第二阶段：等待线程回收
+    LOG_INFO("等待线程回收...");
     std::this_thread::sleep_for(std::chrono::milliseconds(800)); // 等待足够长时间
     
     size_t after_recycle_threads = pool.GetCurrentThreadCount();
+    LOG_INFO("回收后线程数: {}", after_recycle_threads);
+
     // 验证线程确实被回收了
     EXPECT_LT(after_recycle_threads, peak_threads);
     EXPECT_GE(after_recycle_threads, config.core_threads);
@@ -616,6 +641,10 @@ TEST_F(DynamicThreadPoolTest, ThreadIdleTimeoutRecycling) {
     EXPECT_GT(stats.threads_created, config.core_threads);
     EXPECT_GT(stats.threads_destroyed, 0); // 应该有线程被销毁
     EXPECT_EQ(stats.peak_threads, peak_threads);
+
+    LOG_INFO("线程回收测试完成 - 初始: {}, 峰值: {}, 回收后: {}, 创建: {}, 销毁: {}", 
+             config.core_threads, peak_threads, after_recycle_threads,
+             stats.threads_created, stats.threads_destroyed);
 }
 
 // 测试线程回收的统计信息准确性
@@ -652,6 +681,7 @@ TEST_F(DynamicThreadPoolTest, ThreadRecyclingStatistics) {
     size_t created_threads = peak_stats.threads_created;
     size_t peak_count = peak_stats.peak_threads;
     
+    LOG_INFO("峰值期统计 - 创建线程: {}, 峰值线程: {}", created_threads, peak_count);
     EXPECT_GT(created_threads, config.core_threads);
     EXPECT_GT(peak_count, config.core_threads);
     
@@ -664,6 +694,10 @@ TEST_F(DynamicThreadPoolTest, ThreadRecyclingStatistics) {
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
     
     auto final_stats = pool.GetStats();
+
+    LOG_INFO("最终统计 - 创建: {}, 销毁: {}, 峰值: {}, 当前: {}", 
+             final_stats.threads_created, final_stats.threads_destroyed,
+             final_stats.peak_threads, pool.GetCurrentThreadCount());
     
     // 验证统计信息
     EXPECT_EQ(final_stats.threads_created, created_threads); // 创建数应该保持不变
@@ -736,6 +770,9 @@ TEST_F(DynamicThreadPoolTest, ThreadRecyclingBoundaryConditions) {
     // 应该回收到核心线程数
     EXPECT_LE(after_recycle, peak);
     EXPECT_GE(after_recycle, config.core_threads);
+
+    LOG_INFO("边界测试 - 核心线程: {}, 峰值: {}, 回收后: {}", 
+             config.core_threads, peak, after_recycle);
 }
 
 // 测试多轮线程创建和回收
@@ -753,6 +790,7 @@ TEST_F(DynamicThreadPoolTest, MultipleCreateRecycleCycles) {
     
     // 进行3轮创建和回收测试
     for (int cycle = 0; cycle < 3; ++cycle) {
+        LOG_INFO("开始第 {} 轮测试", cycle + 1);
         
         std::vector<std::future<void>> futures;
         
@@ -760,6 +798,7 @@ TEST_F(DynamicThreadPoolTest, MultipleCreateRecycleCycles) {
         for (int i = 0; i < 10; ++i) {
             futures.push_back(
                 pool.SubmitWithResult([cycle, i]() {
+                    LOG_TRACE("执行第 {} 轮任务 {}", cycle + 1, i);
                     std::this_thread::sleep_for(std::chrono::milliseconds(80));
                 })
             );
@@ -781,6 +820,8 @@ TEST_F(DynamicThreadPoolTest, MultipleCreateRecycleCycles) {
         
         size_t after_recycle = pool.GetCurrentThreadCount();
         recycle_threads.push_back(after_recycle);
+
+        LOG_INFO("第 {} 轮完成 - 峰值: {}, 回收后: {}", cycle + 1, peak, after_recycle);
         
         // 验证每轮都能正确回收
         EXPECT_GT(peak, config.core_threads);
@@ -800,6 +841,8 @@ TEST_F(DynamicThreadPoolTest, MultipleCreateRecycleCycles) {
     }
 
     auto final_stats = pool.GetStats();
+    LOG_INFO("多轮测试完成 - 总创建: {}, 总销毁: {}", 
+             final_stats.threads_created, final_stats.threads_destroyed);
     
     EXPECT_GT(final_stats.threads_destroyed, 0);
 }
@@ -1063,7 +1106,19 @@ TEST_F(DynamicThreadPoolTest, ExtremeLoadConditions) {
 // ==================状态控制测试======================
 class StateControlTest : public ::testing::Test {
 protected:
-    void SetUp() override {};
+    void SetUp() override {
+        // 初始化日志系统
+        if (!Logger::GetInstance().IsInitialized()) {
+            LoggerConfig log_config;
+            log_config.name = "test_state_control";
+            log_config.file_path = "../logs/test_state_control.log";
+            log_config.level = LogLevel::DEBUG;
+            log_config.enable_console = false;
+            log_config.enable_file = true;
+            log_config.pattern = "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%n] [线程:%t] %v";
+            Logger::GetInstance().Initialize(log_config);
+        }
+    };
     void TearDown() override {};
 };
 
@@ -1082,6 +1137,7 @@ TEST_F(StateControlTest, PauseAndResume) {
     for (int i = 0; i < 5; ++i) {
         futures.push_back(
             pool.SubmitWithResult([&completed_tasks, i]() {
+                LOG_INFO("执行任务 {}", i);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 completed_tasks.fetch_add(1);
             })
@@ -1120,6 +1176,9 @@ TEST_F(StateControlTest, PauseAndResume) {
     }
     
     EXPECT_EQ(completed_tasks.load(), 5);
+
+    LOG_INFO("暂停测试完成 - 暂停时完成: {}, 最终完成: {}", 
+             paused_completed, completed_tasks.load());
 }
 
 // 测试优雅关闭
@@ -1133,8 +1192,10 @@ TEST_F(StateControlTest, GracefulShutdown) {
     for (int i = 0; i < 6; ++i) {
         futures.push_back(
             pool.SubmitWithResult([&completed_tasks, i]() {
+                LOG_INFO("开始执行长任务 {}", i);
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
                 completed_tasks.fetch_add(1);
+                LOG_INFO("完成长任务 {}", i);
             })
         );
     }
@@ -1158,7 +1219,7 @@ TEST_F(StateControlTest, GracefulShutdown) {
     );
     
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << duration.count() << std::endl;
+    LOG_INFO("优雅关闭耗时: {}ms", duration.count());
     
     // 优雅关闭应该等待所有任务完成，所以时间应该合理
     EXPECT_GE(duration.count(), 100); // 至少等待一些时间
@@ -1175,6 +1236,7 @@ TEST_F(StateControlTest, ShutdownFromPausedState) {
     for (int i = 0; i < 4; ++i) {
         futures.push_back(
             pool.SubmitWithResult([&completed_tasks, i]() {
+                LOG_INFO("执行任务 {}", i);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 completed_tasks.fetch_add(1);
             })
@@ -1197,6 +1259,7 @@ TEST_F(StateControlTest, ShutdownFromPausedState) {
     // - 队列中等待的任务不会被执行
     // - 至少会有1个任务完成（因为50ms等待时间足够至少启动1个任务）
     int completed = completed_tasks.load();
+    LOG_INFO("暂停状态下完成的任务数: {}/4", completed);
     EXPECT_GE(completed, 1);  // 至少1个任务完成
     EXPECT_LE(completed, 2);  // 最多2个任务完成（正在执行的任务）
 }
@@ -1212,14 +1275,16 @@ TEST_F(StateControlTest, TimeoutShutdown) {
     for (int i = 0; i < 4; ++i) {
         futures.push_back(
             pool.SubmitWithResult([&completed_tasks, i]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                LOG_INFO("开始执行超长任务 {}", i);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 completed_tasks.fetch_add(1);
+                LOG_INFO("完成超长任务 {}", i);
             })
         );
     }
     
     // 等待任务开始执行
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     
     // 超时关闭（300ms超时）
     auto start_time = std::chrono::steady_clock::now();
@@ -1229,7 +1294,7 @@ TEST_F(StateControlTest, TimeoutShutdown) {
     EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
     
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << duration.count() << std::endl;
+    LOG_INFO("超时关闭耗时: {}ms, 完成任务数: {}", duration.count(), completed_tasks.load());
     
     // 超时关闭应该在超时时间左右完成
     EXPECT_GE(duration.count(), 250);
@@ -1251,8 +1316,10 @@ TEST_F(StateControlTest, ForceShutdown) {
     for (int i = 0; i < 6; ++i) {
         futures.push_back(
             pool.SubmitWithResult([&completed_tasks, i]() {
+                LOG_INFO("开始执行长任务 {}", i);
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 completed_tasks.fetch_add(1);
+                LOG_INFO("完成长任务 {}", i);
             })
         );
     }
@@ -1268,7 +1335,7 @@ TEST_F(StateControlTest, ForceShutdown) {
     EXPECT_EQ(pool.GetState(), ThreadPoolState::STOPPED);
     
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << duration.count() << std::endl;
+    LOG_INFO("强制停止耗时: {}ms, 完成任务数: {}", duration.count(), completed_tasks.load());
     
     // 强制停止应该很快完成
     EXPECT_LT(duration.count(), 200);

@@ -21,6 +21,9 @@ add_executable(mpmc_blocking_queue_test
 add_executable(thread_pool_test
     unit/thread_pool_test.cpp)
 
+add_executable(thread_pool_config_test
+    unit/thread_pool_config_test.cpp)
+
 # 链接必要的库
 target_link_libraries(circular_queue_test
     GTest::gtest
@@ -37,11 +40,17 @@ target_link_libraries(thread_pool_test
     GTest::gtest_main
     thread_pool_lib)
 
+target_link_libraries(thread_pool_config_test
+    GTest::gtest
+    GTest::gtest_main
+    thread_pool_lib)
+
 # 启用测试
 enable_testing()
 add_test(NAME CirculatQueueTests COMMAND circular_queue_test)
 add_test(NAME MPMCBlockingQueueTests COMMAND mpmc_blocking_queue_test)
 add_test(NAME ThreadPoolTests COMMAND thread_pool_test)
+add_test(NAME ThreadPoolConfigTests COMMAND thread_pool_config_test)
 
 # 添加编译选项
 target_compile_options(circular_queue_test PRIVATE
@@ -49,4 +58,6 @@ target_compile_options(circular_queue_test PRIVATE
 target_compile_options(mpmc_blocking_queue_test PRIVATE
     -Wall -Wextra -Wpedantic)
 target_compile_options(thread_pool_test PRIVATE
+    -Wall -Wextra -Wpedantic)
+target_compile_options(thread_pool_config_test PRIVATE
     -Wall -Wextra -Wpedantic)
