@@ -34,9 +34,12 @@ add_library(thread_pool_lib
 target_link_libraries(thread_pool_lib
     Threads::Threads
     spdlog::spdlog
+    nlohmann_json::nlohmann_json
 )
 
 
 # 添加测试子目录
 add_subdirectory(test)
+# 添加branchmark子目录
+add_subdirectory(benchmark)
 

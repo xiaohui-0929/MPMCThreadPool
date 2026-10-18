@@ -1,0 +1,54 @@
+{
+    "comment": "线程池性能压测配置文件",
+    "thread_pool": {
+        "core_threads": 16,
+        "max_threads": 32,
+        "max_queue_size": 5000000,
+        "keep_alive_time_ms": 60000,
+        "queue_full_policy": "DISCARD",
+        "enable_dynamic_threads": true,
+        "thread_creation_threshold": 1,
+        "thread_idle_timeout_ms": 30000,
+        "load_check_interval_ms": 20,
+        "scale_up_threshold": 0.8,
+        "scale_down_threshold": 0.2,
+        "min_idle_time_for_removal_ms": 10000,
+        "max_consecutive_idle_checks": 3
+    },
+    "benchmark": {
+        "total_tasks": 100000000,
+        "duration_seconds": 30,
+        "warmup_seconds": 5,
+        "use_duration_mode": false,
+        "enable_logging": true,
+        "enable_console_output": true,
+        "enable_real_time_monitoring": true,
+        "monitoring_interval_ms": 1000
+    },
+    "performance_test_configs": [
+        {
+            "name": "低并发测试",
+            "core_threads": 2,
+            "max_threads": 4,
+            "max_queue_size": 50000
+        },
+        {
+            "name": "中等并发测试",
+            "core_threads": 4,
+            "max_threads": 8,
+            "max_queue_size": 100000
+        },
+        {
+            "name": "高并发测试",
+            "core_threads": 8,
+            "max_threads": 16,
+            "max_queue_size": 200000
+        },
+        {
+            "name": "极高并发测试",
+            "core_threads": 16,
+            "max_threads": 32,
+            "max_queue_size": 500000
+        }
+    ]
+}
